@@ -1,0 +1,24 @@
+[package]
+name = "hsc"
+version = "0.1.0"
+edition = "2021"
+authors = ["Qingshan <qzou@cloudian.com>"]
+description = "High-performance S3 CLI tool"
+license = "MIT"
+repository = "https://github.com/qzou-cloudian/hsc"
+keywords = ["s3", "aws", "cli", "cloud-storage"]
+categories = ["command-line-utilities"]
+
+[dependencies]
+aws-config = "1.8.14"
+aws-sdk-s3 = "1.124.0"
+chrono = "0.4.44"
+clap = { version = "4.5.60", features = ["derive"] }
+crc32fast = "1.5.0"
+futures-util = "0.3.32"
+glob = "0.3.3"
+md-5 = "0.10.6"
+sha-1 = "0.10.1"
+sha2 = "0.10.9"
+tokio = { version = "1.49.0", features = ["full"] }
+walkdir = "2.5.0"
