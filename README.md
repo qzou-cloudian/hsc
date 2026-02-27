@@ -26,16 +26,6 @@ cd hsc
 cargo build --release
 ```
 
-### Verify files match
-
-```bash
-# Verify local and S3 copies are identical
-hsc cmp ./myfile.txt s3://my-bucket/myfile.txt
-
-# Verify a specific byte range
-hsc cmp --range 0-999 ./header.bin s3://bucket/header.bin
-```
-
 ## Quick Start
 
 ```bash
@@ -190,6 +180,16 @@ hsc diff ./local-dir s3://bucket/prefix/
 hsc diff --compare-content ./dir1 ./dir2
 ```
 
+Compare files/objects with specific byte ranges:
+
+```bash
+# Verify local and S3 copies are identical
+hsc cmp ./myfile.txt s3://my-bucket/myfile.txt
+
+# Verify a specific byte range
+hsc cmp --range 0-999 ./header.bin s3://bucket/header.bin
+```
+
 ## S3-Compatible Services
 
 Works with MinIO, Cloudian, and other S3-compatible storage:
@@ -236,12 +236,13 @@ hsc diff s3://prod-bucket/data/ s3://staging-bucket/data/ --compare-content
 hsc cat s3://logs/app.log --offset $(hsc stat s3://logs/app.log | grep Size | awk '{print $3-1000}') | tail
 ```
 
-## Performance
+### More Examples
 
-- **Async I/O**: Built on Tokio for high concurrency
-- **Streaming**: Memory-efficient streaming for large files
-- **Multipart**: Automatic multipart uploads for files over threshold
-- **Smart Sync**: Only transfers changed files
+- **Quick reference:** [QUICK_REFERENCE.md](QUICK_REFERENCE.md)
+- **Full reference:** [docs/REFERENCE.md](docs/REFERENCE.md)
+
+See `examples/` directory for real-world usage:
+- **[S3 Functional Test Script](examples/s3_functional_test.sh)** - Tests bucket operations, object put/get with various sizes, and range requests.
 
 ## Testing
 
@@ -256,8 +257,6 @@ cd tests
 ./test_diff.sh
 ./test_cmp.sh
 ```
-
-See `examples/` directory for AWS configuration samples.
 
 ## License
 
