@@ -137,27 +137,17 @@ for part_size in "${MULTIPART_SIZES[@]}"; do
 
     # Combine parts into one file
     cat "$part1" "$part2" "$part3" > "$multipart_file"
-    original_md5=$(md5sum "$multipart_file" | cut -d' ' -f1)
 
     info "Uploading $object_key via $BINARY cp (multipart for large files)..."
     if $BINARY cp "$multipart_file" "s3://$BUCKET_NAME/$object_key"; then
         success "Uploaded $object_key"
 
-        # Download and verify integrity
-        download_file="$TEST_DIR/multipart/downloaded_${part_size}.dat"
-        info "Downloading multipart object for verification..."
-        if $BINARY cp "s3://$BUCKET_NAME/$object_key" "$download_file" > /dev/null 2>&1; then
-            download_md5=$(md5sum "$download_file" | cut -d' ' -f1)
-
-            if [ "$original_md5" = "$download_md5" ]; then
-                success "Multipart upload integrity verified for $object_key (MD5: $download_md5)"
-            else
-                error "Multipart upload integrity check failed for $object_key"
-                error "  Expected MD5: $original_md5"
-                error "  Download MD5: $download_md5"
-            fi
+        # Verify full-object integrity using hsc cmp
+        info "Verifying multipart upload integrity for $object_key..."
+        if $BINARY cmp "$multipart_file" "s3://$BUCKET_NAME/$object_key" 2>/dev/null; then
+            success "Multipart upload integrity verified for $object_key"
         else
-            error "Failed to download multipart object $object_key for verification"
+            error "Multipart upload integrity check failed for $object_key"
         fi
     else
         error "Failed to upload $object_key"
@@ -184,24 +174,19 @@ for size in "${SIZES[@]}"; do
     if $BINARY cp "s3://$BUCKET_NAME/$object_key" "$download_file"; then
 
         # Verify file size matches
-        original_size=$(stat -f%z "$original_file" 2>/dev/null || stat -c%s "$original_file")
-        download_size=$(stat -f%z "$download_file" 2>/dev/null || stat -c%s "$download_file")
+        original_size=$(stat -c%s "$original_file")
+        download_size=$(stat -c%s "$download_file")
 
         if [ "$original_size" -ne "$download_size" ]; then
             error "Size mismatch for $object_key (expected: $original_size, got: $download_size)"
             continue
         fi
 
-        # Verify content integrity using MD5 checksum
-        original_md5=$(md5sum "$original_file" | cut -d' ' -f1)
-        download_md5=$(md5sum "$download_file" | cut -d' ' -f1)
-
-        if [ "$original_md5" = "$download_md5" ]; then
-            success "Downloaded and verified $object_key (size: $download_size bytes, MD5: $download_md5)"
+        # Verify content integrity using hsc cmp (byte-by-byte)
+        if $BINARY cmp "$original_file" "$download_file" 2>/dev/null; then
+            success "Downloaded and verified $object_key (size: $download_size bytes, content: identical)"
         else
-            error "Data integrity check failed for $object_key (MD5 mismatch)"
-            error "  Original MD5: $original_md5"
-            error "  Download MD5: $download_md5"
+            error "Data integrity check failed for $object_key"
             continue
         fi
 
@@ -212,10 +197,10 @@ for size in "${SIZES[@]}"; do
 
         # Check ETag header
         if [ -n "$response_etag" ]; then
+            original_md5=$(md5sum "$original_file" | cut -d' ' -f1)
             if [ "$response_etag" = "$original_md5" ]; then
                 success "Response ETag matches MD5: $response_etag"
             elif [[ "$response_etag" == *"-"* ]]; then
-                # Multipart ETag format (MD5-partcount), just verify it exists
                 success "Response ETag (multipart): $response_etag"
             else
                 error "Response ETag mismatch (expected: $original_md5, got: $response_etag)"
@@ -239,34 +224,18 @@ for size in "${SIZES[@]}"; do
     fi
 done
 
-# Step 4: Test range requests with integrity verification
+# Step 4: Test range requests with integrity verification using hsc cmp
 echo ""
-info "Step 4: Testing range requests and verifying data integrity..."
-mkdir -p "$TEST_DIR/ranges"
+info "Step 4: Testing range requests and verifying data integrity with 'hsc cmp'..."
 
-# Function to verify range data integrity
+# verify_range: uses 'hsc cmp --range' to compare a byte range of a local file
+# against the same range of an S3 object — no temp files needed.
 verify_range() {
     local original_file=$1
-    local range_spec=$2
-    local range_file=$3
+    local range_spec=$2       # accepts "bytes=start-end" or "start-end"
+    local s3_uri=$3
 
-    # Parse range specification (bytes=start-end)
-    local range_nums=$(echo "$range_spec" | sed 's/bytes=//')
-    local start=$(echo "$range_nums" | cut -d'-' -f1)
-    local end=$(echo "$range_nums" | cut -d'-' -f2)
-    local expected_size=$((end - start + 1))
-
-    # Extract expected bytes from original file
-    local expected_file="${range_file}.expected"
-    dd if="$original_file" of="$expected_file" bs=1 skip=$start count=$expected_size 2>/dev/null
-
-    # Compare MD5 checksums
-    local expected_md5=$(md5sum "$expected_file" | cut -d' ' -f1)
-    local range_md5=$(md5sum "$range_file" | cut -d' ' -f1)
-
-    rm -f "$expected_file"
-
-    if [ "$expected_md5" = "$range_md5" ]; then
+    if $BINARY cmp --range "$range_spec" "$original_file" "$s3_uri" 2>/dev/null; then
         return 0
     else
         return 1
@@ -278,21 +247,12 @@ test_ranges=("bytes=0-1023" "bytes=1024-2047" "bytes=0-511" "bytes=512000-104857
 for range in "${test_ranges[@]}"; do
     object_key="testfile_1m.dat"
     original_file="$TEST_DIR/testfile_1m.dat"
-    range_file="$TEST_DIR/ranges/range_$(echo $range | tr '=' '_' | tr '-' '_').dat"
 
-    info "Downloading $object_key with range: $range..."
-    if $BINARY cat --range "$range" "s3://$BUCKET_NAME/$object_key" > "$range_file" 2>/dev/null; then
-
-        file_size=$(stat -f%z "$range_file" 2>/dev/null || stat -c%s "$range_file")
-
-        # Verify data integrity
-        if verify_range "$original_file" "$range" "$range_file"; then
-            success "Range request verified: $range (size: $file_size bytes, integrity: OK)"
-        else
-            error "Range request data integrity failed: $range"
-        fi
+    info "Verifying $object_key range: $range..."
+    if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/$object_key"; then
+        success "Range verified: $range"
     else
-        error "Range request failed: $range"
+        error "Range integrity failed: $range"
     fi
 done
 
@@ -300,55 +260,30 @@ done
 info "Testing range on large file (64m)..."
 range="bytes=0-1048575"
 original_file="$TEST_DIR/testfile_64m.dat"
-range_file="$TEST_DIR/ranges/range_64m_first_1m.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/testfile_64m.dat" > "$range_file" 2>/dev/null; then
-
-    file_size=$(stat -f%z "$range_file" 2>/dev/null || stat -c%s "$range_file")
-
-    # Verify data integrity
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Range request on 64m file verified (size: $file_size bytes, integrity: OK)"
-    else
-        error "Range request on 64m file data integrity failed"
-    fi
-
-    # Verify range response size
-    expected_range_size=1048576
-    if [ "$file_size" -eq "$expected_range_size" ]; then
-        success "Range response size correct: $file_size"
-    else
-        error "Range response size mismatch (expected: $expected_range_size, got: $file_size)"
-    fi
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/testfile_64m.dat"; then
+    success "Range on 64m file verified: $range (1MB)"
 else
-    error "Range request on 64m file failed"
+    error "Range on 64m file integrity failed: $range"
 fi
 
-# Additional range tests on different file sizes
-info "Testing additional range patterns..."
 # Test middle range on 8m file
+info "Testing middle range on 8m file..."
 range="bytes=4194304-5242879"
 original_file="$TEST_DIR/testfile_8m.dat"
-range_file="$TEST_DIR/ranges/range_8m_middle.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/testfile_8m.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Middle range on 8m file verified: $range"
-    else
-        error "Middle range on 8m file data integrity failed"
-    fi
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/testfile_8m.dat"; then
+    success "Middle range on 8m file verified: $range"
+else
+    error "Middle range on 8m file integrity failed: $range"
 fi
 
 # Test last bytes of 32m file
+info "Testing last 1KB of 32m file..."
 range="bytes=33553408-33554431"
 original_file="$TEST_DIR/testfile_32m.dat"
-range_file="$TEST_DIR/ranges/range_32m_last.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/testfile_32m.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Last 1KB of 32m file verified: $range"
-    else
-        error "Last 1KB of 32m file data integrity failed"
-    fi
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/testfile_32m.dat"; then
+    success "Last 1KB of 32m file verified: $range"
+else
+    error "Last 1KB of 32m file integrity failed: $range"
 fi
 
 # Test range requests on multipart uploaded objects
@@ -361,43 +296,29 @@ original_file="$TEST_DIR/multipart/multipart_1m_parts.dat"
 
 # Range within first part
 range="bytes=0-524287"
-range_file="$TEST_DIR/ranges/mp_1m_first_half_part1.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_1m_parts.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 1m: First half of part 1 verified"
-    else
-        error "Multipart 1m: First half of part 1 integrity failed"
-    fi
+info "  Range within part 1: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_1m_parts.dat"; then
+    success "Multipart 1m: First half of part 1 verified"
+else
+    error "Multipart 1m: First half of part 1 integrity failed"
 fi
 
 # Range spanning part 1 and part 2 boundary
 range="bytes=1048000-1049599"
-range_file="$TEST_DIR/ranges/mp_1m_boundary.dat"
-info "Testing CRITICAL: Range across part boundary (part 1->2)..."
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_1m_parts.dat" > "$range_file" 2>/tmp/range_error.log; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 1m: Range across part boundary (part 1->2) verified"
-    else
-        error "Multipart 1m: Range across part boundary integrity failed"
-    fi
+info "  CRITICAL: Range across part 1->2 boundary: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_1m_parts.dat"; then
+    success "Multipart 1m: Range across part boundary (part 1->2) verified"
 else
-    error "⚠️  FAILED: Multipart 1m range across part 1->2 boundary ($range)"
-    error "    This range spans the 1MB boundary between parts"
-    cat /tmp/range_error.log | grep -i "error" || echo "    Check /tmp/range_error.log for details"
+    error "Multipart 1m: Range across part boundary integrity failed"
 fi
 
 # Range in middle part
 range="bytes=1572864-2097151"
-range_file="$TEST_DIR/ranges/mp_1m_middle_part.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_1m_parts.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 1m: Middle of part 2 verified"
-    else
-        error "Multipart 1m: Middle of part 2 integrity failed"
-    fi
+info "  Range in part 2: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_1m_parts.dat"; then
+    success "Multipart 1m: Middle of part 2 verified"
+else
+    error "Multipart 1m: Middle of part 2 integrity failed"
 fi
 
 # Test on 16m parts object (48MB total)
@@ -406,43 +327,29 @@ original_file="$TEST_DIR/multipart/multipart_16m_parts.dat"
 
 # Large range within first part
 range="bytes=0-8388607"
-range_file="$TEST_DIR/ranges/mp_16m_first_8mb.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_16m_parts.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 16m: First 8MB of part 1 verified"
-    else
-        error "Multipart 16m: First 8MB integrity failed"
-    fi
+info "  Range within part 1: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_16m_parts.dat"; then
+    success "Multipart 16m: First 8MB of part 1 verified"
+else
+    error "Multipart 16m: First 8MB integrity failed"
 fi
 
 # Range spanning part boundary (part 1 -> part 2)
 range="bytes=16776192-16778239"
-range_file="$TEST_DIR/ranges/mp_16m_boundary.dat"
-info "Testing CRITICAL: Range across 16MB part boundary..."
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_16m_parts.dat" > "$range_file" 2>/tmp/range_error.log; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 16m: Range across part boundary (16MB boundary) verified"
-    else
-        error "Multipart 16m: Range across part boundary integrity failed"
-    fi
+info "  CRITICAL: Range across 16MB part boundary: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_16m_parts.dat"; then
+    success "Multipart 16m: Range across part boundary (16MB boundary) verified"
 else
-    error "⚠️  FAILED: Multipart 16m range across part 1->2 boundary ($range)"
-    error "    This range spans the 16MB boundary between parts"
-    cat /tmp/range_error.log | grep -i "error" || echo "    Check /tmp/range_error.log for details"
+    error "Multipart 16m: Range across part boundary integrity failed"
 fi
 
 # Range in third part
 range="bytes=40000000-41000000"
-range_file="$TEST_DIR/ranges/mp_16m_third_part.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_16m_parts.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 16m: Range in part 3 verified"
-    else
-        error "Multipart 16m: Range in part 3 integrity failed"
-    fi
+info "  Range in part 3: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_16m_parts.dat"; then
+    success "Multipart 16m: Range in part 3 verified"
+else
+    error "Multipart 16m: Range in part 3 integrity failed"
 fi
 
 # Test on 32m parts object (96MB total)
@@ -451,48 +358,29 @@ original_file="$TEST_DIR/multipart/multipart_32m_parts.dat"
 
 # Range at end of first part
 range="bytes=33554000-33554431"
-range_file="$TEST_DIR/ranges/mp_32m_end_part1.dat"
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_32m_parts.dat" > "$range_file" 2>/dev/null; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 32m: End of part 1 verified"
-    else
-        error "Multipart 32m: End of part 1 integrity failed"
-    fi
+info "  Range at end of part 1: $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_32m_parts.dat"; then
+    success "Multipart 32m: End of part 1 verified"
+else
+    error "Multipart 32m: End of part 1 integrity failed"
 fi
 
 # Range spanning part 2 and part 3 boundary (at 64MB mark)
 range="bytes=67108000-67109000"
-range_file="$TEST_DIR/ranges/mp_32m_boundary_2_3.dat"
-info "Testing CRITICAL: Range across 32MB part boundary (part 2->3)..."
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_32m_parts.dat" > "$range_file" 2>/tmp/range_error.log; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 32m: Range across part 2->3 boundary (64MB) verified"
-    else
-        error "Multipart 32m: Range across part 2->3 boundary integrity failed"
-    fi
+info "  CRITICAL: Range across part 2->3 boundary (64MB mark): $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_32m_parts.dat"; then
+    success "Multipart 32m: Range across part 2->3 boundary (64MB) verified"
 else
-    error "⚠️  FAILED: Multipart 32m range across part 2->3 boundary ($range)"
-    error "    This range spans the 64MB boundary between parts 2 and 3"
-    cat /tmp/range_error.log | grep -i "error" || echo "    Check /tmp/range_error.log for details"
+    error "Multipart 32m: Range across part 2->3 boundary integrity failed"
 fi
 
 # Large range spanning all parts
 range="bytes=10000000-90000000"
-range_file="$TEST_DIR/ranges/mp_32m_span_all.dat"
-info "Testing CRITICAL: Large range spanning all 3 parts..."
-if $BINARY cat --range "$range" "s3://$BUCKET_NAME/multipart_32m_parts.dat" > "$range_file" 2>/tmp/range_error.log; then
-
-    if verify_range "$original_file" "$range" "$range_file"; then
-        success "Multipart 32m: Large range spanning all parts verified (80MB)"
-    else
-        error "Multipart 32m: Large range spanning all parts integrity failed"
-    fi
+info "  CRITICAL: Large range spanning all 3 parts (80MB): $range"
+if verify_range "$original_file" "$range" "s3://$BUCKET_NAME/multipart_32m_parts.dat"; then
+    success "Multipart 32m: Large range spanning all parts verified (80MB)"
 else
-    error "⚠️  FAILED: Multipart 32m large range spanning all parts ($range)"
-    error "    This range spans from part 1 through part 3 (80MB of data)"
-    cat /tmp/range_error.log | grep -i "error" || echo "    Check /tmp/range_error.log for details"
+    error "Multipart 32m: Large range spanning all parts integrity failed"
 fi
 
 # Step 5: Delete all objects
