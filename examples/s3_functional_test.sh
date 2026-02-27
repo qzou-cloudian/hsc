@@ -412,11 +412,12 @@ done
 # Verify bucket is empty
 echo ""
 info "Verifying bucket is empty..."
-object_count=$($BINARY ls "s3://$BUCKET_NAME" | wc -l)
+object_count=$($BINARY ls "s3://$BUCKET_NAME" | grep -c "^[0-9]" || true)
 if [ "$object_count" -eq 0 ]; then
     success "Bucket is empty"
 else
-    error "Bucket still contains objects"
+    error "Bucket still contains $object_count object(s)"
+    $BINARY ls "s3://$BUCKET_NAME"
 fi
 
 # Step 6: Delete bucket
