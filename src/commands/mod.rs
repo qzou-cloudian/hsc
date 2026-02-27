@@ -1,4 +1,5 @@
 pub mod cat;
+pub mod cmp;
 pub mod cp;
 pub mod diff;
 pub mod ls;

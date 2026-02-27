@@ -166,6 +166,22 @@ enum Commands {
         #[arg(long)]
         size: Option<u64>,
     },
+    /// Compare two files or objects byte-by-byte
+    Cmp {
+        /// First path (local path or s3://bucket/key)
+        path1: String,
+        /// Second path (local path or s3://bucket/key)
+        path2: String,
+        /// Byte range to compare (e.g., "0-999" or "bytes=0-999")
+        #[arg(long)]
+        range: Option<String>,
+        /// Byte offset to start comparison from
+        #[arg(long)]
+        offset: Option<u64>,
+        /// Number of bytes to compare (used with --offset)
+        #[arg(long)]
+        size: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -278,5 +294,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             offset,
             size,
         } => commands::cat::cat(&client, &path, range, offset, size).await,
+        Commands::Cmp {
+            path1,
+            path2,
+            range,
+            offset,
+            size,
+        } => commands::cmp::cmp(&client, &path1, &path2, range, offset, size).await,
     }
 }
