@@ -43,6 +43,8 @@ hsc diff ./local s3://bucket/remote/  # Compare directories
 hsc cat s3://bucket/file.txt          # Print to stdout
 hsc cat file.txt --range 0-999        # First 1000 bytes
 hsc cat s3://log.txt | grep ERROR     # Pipe to other tools
+hsc cmp file.txt s3://bucket/file.txt # Compare byte-by-byte (exit 0=same, 1=differ)
+hsc cmp --range 0-999 a.bin b.bin     # Compare a specific byte range
 hsc rm s3://bucket/file.txt           # Delete object
 hsc rm s3://bucket/logs/ -r           # Delete all with prefix
 ```
@@ -173,5 +175,5 @@ hsc --version             # Show version
 ## More Information
 - [Full documentation](README.md)
 - [Command reference](docs/REFERENCE.md)
-- [Environment Variables](doncs/ENVIRONMENT.md)
+- [Environment Variables](docs/ENVIRONMENT.md)
 - [Usage Examples](docs/EXAMPLES.md)

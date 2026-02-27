@@ -650,3 +650,56 @@ hsc ls | tail -n +2 | head -n -1 | awk '{print $2}' | while read BUCKET; do
 done
 ```
 
+## Cmp Command Examples
+
+### Verify upload integrity
+
+```bash
+hsc cp important.dat s3://bucket/important.dat
+hsc cmp important.dat s3://bucket/important.dat && echo "Upload verified"
+```
+
+### Compare two S3 objects
+
+```bash
+hsc cmp s3://bucket-a/data.bin s3://bucket-b/data.bin
+```
+
+### Compare a specific byte range
+
+```bash
+# Verify only the first 1KB (e.g., a file header)
+hsc cmp --range 0-1023 local-file.bin s3://bucket/remote-file.bin
+
+# Verify a middle section using offset and size
+hsc cmp --offset 4096 --size 512 file-a.bin file-b.bin
+```
+
+### Use cmp in scripts
+
+```bash
+#!/bin/bash
+# Verify that a backup matches the original
+SOURCE="./data/archive.tar.gz"
+BACKUP="s3://backups/archive.tar.gz"
+
+hsc cp "$SOURCE" "$BACKUP"
+
+if hsc cmp "$SOURCE" "$BACKUP"; then
+    echo "Backup verified successfully"
+else
+    echo "WARNING: Backup does not match source!" >&2
+    exit 1
+fi
+```
+
+### Compare local files (like the standard cmp tool)
+
+```bash
+# Compare two local files
+hsc cmp file-v1.bin file-v2.bin
+
+# Compare a range of two local files
+hsc cmp --range 512-1023 build-a.bin build-b.bin
+```
+

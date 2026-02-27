@@ -5,7 +5,7 @@ A fast, feature-rich command-line tool for AWS S3 and S3-compatible storage, wri
 
 ## Features
 
-- **10 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`
+- **11 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`
 - **Multipart Upload**: Automatic multipart transfers for large files with configurable thresholds
 - **Checksum Validation**: Support for CRC32, CRC32C, SHA1, and SHA256
 - **Smart Filtering**: Include/exclude patterns using glob syntax
@@ -24,6 +24,16 @@ Or build from source:
 git clone <repository-url>
 cd hsc
 cargo build --release
+```
+
+### Verify files match
+
+```bash
+# Verify local and S3 copies are identical
+hsc cmp ./myfile.txt s3://my-bucket/myfile.txt
+
+# Verify a specific byte range
+hsc cmp --range 0-999 ./header.bin s3://bucket/header.bin
 ```
 
 ## Quick Start
@@ -71,6 +81,7 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 - **`stat <path> [--recursive]`** - Display detailed file/object metadata
 - **`diff <source> <dest>`** - Compare directories or buckets
 - **`cat <path> [--range <start-end>]`** - Output file content to stdout
+- **`cmp <path1> <path2> [--range <start-end>]`** - Compare two files or objects byte-by-byte
 
 ## Configuration
 
@@ -243,6 +254,7 @@ cd tests
 ./test_multipart.sh
 ./test_stat_comprehensive.sh
 ./test_diff.sh
+./test_cmp.sh
 ```
 
 See `examples/` directory for AWS configuration samples.

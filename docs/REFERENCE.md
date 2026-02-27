@@ -225,6 +225,37 @@ hsc diff s3://bucket-a/data/ s3://bucket-b/data/      # Compare S3 locations
 hsc diff --include "*.txt" ./docs s3://bucket/docs/
 ```
 
+### cmp - Compare
+
+Compare two files or objects byte-by-byte. Silent and exits 0 if identical; prints the first difference to stderr and exits 1 if they differ.
+
+```bash
+hsc cmp <path1> <path2> [options]
+```
+
+**Options:**
+- `--range <start-end>` - Compare a specific byte range (e.g., `0-999` or `bytes=0-999`)
+- `--offset <bytes>` - Start comparison from this byte offset
+- `--size <bytes>` - Number of bytes to compare
+
+**Exit Codes:**
+- `0` - Files are identical (within the requested range)
+- `1` - Files differ (first differing byte and line number printed to stderr)
+
+**Output:**
+- On difference: `<path1> <path2> differ: byte N, line M` (1-based)
+- On size mismatch: `cmp: EOF on <shorter-path>`
+- On identical: no output
+
+**Examples:**
+```bash
+hsc cmp file.txt s3://bucket/file.txt          # Verify local matches S3
+hsc cmp s3://bucket/a.bin s3://bucket/b.bin    # Compare two S3 objects
+hsc cmp --range 0-999 a.bin b.bin              # Compare first 1000 bytes only
+hsc cmp --offset 512 --size 256 a.bin b.bin    # Compare bytes 512-767
+hsc cmp a.bin b.bin && echo "identical"        # Use in scripts
+```
+
 ### cat - Concatenate
 
 Output file or object content to stdout.
