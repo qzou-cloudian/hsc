@@ -1,9 +1,8 @@
 # hsc - High-Performance S3 CLI
 
 A fast, feature-rich command-line tool for AWS S3 and S3-compatible storage, written in Rust.
-hsc supports **RDMA-accelerated transfers** via the NVIDIA cuObject API, enabling GPU-direct
-data paths that bypass the CPU and system memory for dramatically higher throughput when
-moving data between S3-compatible object storage and GPU memory.
+hsc supports **RDMA-accelerated transfers** via the NVIDIA cuObject API, enabling direct data transfers
+between GPU memory or system memory and S3 compatible object storage using RDMA.
 
 
 ## Features
@@ -321,3 +320,4 @@ Contributions welcome! Please feel free to submit issues or pull requests.
 - [AWS CLI S3 Commands](https://docs.aws.amazon.com/cli/latest/reference/s3/)
 - [MinIO Client](https://min.io/docs/minio/linux/reference/minio-mc.html)
 - [AWS SDK for Rust](https://github.com/awslabs/aws-sdk-rust)
+- [NVIDIA cuObject: GPUDirect Storage for Objects](https://docs.nvidia.com/gpudirect-storage/cuobject/)
