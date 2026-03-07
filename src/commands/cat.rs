@@ -4,6 +4,14 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
+#[cfg(feature = "rdma")]
+use crate::rdma::{RdmaInterceptor, RdmaProvider};
+#[cfg(feature = "rdma")]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 /// Concatenate and print file or object content to STDOUT
 pub async fn cat(
     client: &Client,
@@ -11,6 +19,7 @@ pub async fn cat(
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate options
     if range.is_some() && (offset.is_some() || size.is_some()) {
@@ -24,7 +33,16 @@ pub async fn cat(
             if key.is_empty() {
                 return Err("Cannot cat an S3 bucket, please specify an object key".into());
             }
-            cat_s3_object(client, &bucket, &key, range, offset, size).await
+            cat_s3_object(
+                client,
+                &bucket,
+                &key,
+                range,
+                offset,
+                size,
+                #[cfg(feature = "rdma")] rdma,
+            )
+            .await
         }
         PathType::Local(local_path) => cat_local_file(&local_path, range, offset, size).await,
     }
@@ -38,38 +56,115 @@ async fn cat_s3_object(
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut request = client.get_object().bucket(bucket).key(key);
-
-    // Handle range options
-    if let Some(range_str) = range {
-        // Normalize range format (accept "0-100" or "bytes=0-100")
-        let normalized = if range_str.starts_with("bytes=") {
+    // Build the Range header string (if any).
+    let range_hdr = if let Some(range_str) = range {
+        Some(if range_str.starts_with("bytes=") {
             range_str
         } else {
             format!("bytes={}", range_str)
-        };
-        request = request.range(normalized);
-    } else if let Some(start) = offset {
-        // Build range from offset and size
-        let range_str = if let Some(len) = size {
-            format!("bytes={}-{}", start, start + len - 1)
+        })
+    } else {
+        offset.map(|start| {
+            if let Some(len) = size {
+                format!("bytes={}-{}", start, start + len - 1)
+            } else {
+                format!("bytes={}-", start)
+            }
+        })
+    };
+
+    // When RDMA is enabled and we know the response size, use the RDMA path.
+    #[cfg(feature = "rdma")]
+    if let Some(ref provider) = rdma {
+        // We need the byte count to allocate a receive buffer.  A HEAD request
+        // gives us Content-Length; for ranged requests we compute from the range.
+        let byte_count: Option<usize> = if let Some(ref r) = range_hdr {
+            // Parse "bytes=start-end" to derive length
+            r.strip_prefix("bytes=").and_then(|s| {
+                let mut parts = s.splitn(2, '-');
+                let start = parts.next()?.parse::<u64>().ok()?;
+                let end_str = parts.next()?;
+                if end_str.is_empty() {
+                    None // open-ended range — size unknown without HEAD
+                } else {
+                    let end = end_str.parse::<u64>().ok()?;
+                    Some((end - start + 1) as usize)
+                }
+            })
         } else {
-            format!("bytes={}-", start)
+            // Full object — HEAD for size
+            client
+                .head_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .ok()
+                .and_then(|h| h.content_length())
+                .map(|n| n.max(0) as usize)
         };
-        request = request.range(range_str);
+
+        if let Some(size) = byte_count {
+            let mut buffer: Vec<u8> = vec![0u8; size];
+            let suitable = size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size);
+            if suitable {
+                provider.register_memory(buffer.as_mut_ptr(), size)?;
+            }
+            let maybe_token = if suitable {
+                let s3_key = format!("{bucket}/{key}");
+                provider
+                    .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), size, 0)
+                    .ok()
+            } else {
+                None
+            };
+            let rdma_attempted = maybe_token.is_some();
+            let mut request = client.get_object().bucket(bucket).key(key);
+            if let Some(ref r) = range_hdr {
+                request = request.range(r.clone());
+            }
+            let rdma_confirmed = Arc::new(AtomicBool::new(false));
+            let response = if let Some(token) = maybe_token {
+                let interceptor = RdmaInterceptor::new_get(
+                    Arc::clone(provider),
+                    token,
+                    size,
+                    Arc::clone(&rdma_confirmed),
+                    false,
+                );
+                request.customize().interceptor(interceptor).send().await?
+            } else {
+                request.send().await?
+            };
+            let mut stdout = io::stdout();
+            if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
+                stdout.write_all(&buffer[..size]).await?;
+            } else {
+                let mut body = response.body;
+                while let Some(bytes) = body.try_next().await? {
+                    stdout.write_all(&bytes).await?;
+                }
+            }
+            if suitable {
+                let _ = provider.deregister_memory(buffer.as_mut_ptr());
+            }
+            stdout.flush().await?;
+            return Ok(());
+        }
     }
 
+    let mut request = client.get_object().bucket(bucket).key(key);
+    if let Some(r) = range_hdr {
+        request = request.range(r);
+    }
     let response = request.send().await?;
     let mut body = response.body;
-
-    // Stream output to STDOUT
     let mut stdout = io::stdout();
-
     while let Some(bytes) = body.try_next().await? {
         stdout.write_all(&bytes).await?;
     }
-
     stdout.flush().await?;
 
     Ok(())
@@ -145,11 +240,7 @@ fn parse_range_options(
 ) -> Result<(Option<u64>, Option<u64>), Box<dyn std::error::Error>> {
     if let Some(range_str) = range {
         // Parse range string like "0-100" or "bytes=0-100"
-        let range_part = if range_str.starts_with("bytes=") {
-            &range_str[6..]
-        } else {
-            &range_str[..]
-        };
+        let range_part = range_str.strip_prefix("bytes=").unwrap_or(&range_str);
 
         let parts: Vec<&str> = range_part.split('-').collect();
         if parts.len() != 2 {

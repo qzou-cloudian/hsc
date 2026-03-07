@@ -10,8 +10,10 @@ Available for all commands:
 --profile <name>        AWS profile to use
 --region <region>       AWS region override
 --endpoint-url <url>    Custom S3 endpoint (for S3-compatible services)
---no-verify-ssl         Disable SSL certificate verification
+--no-verify-ssl         Disable SSL certificate verification (not yet implemented)
 --debug                 Enable debug logging
+--rdma [PROVIDER]       Enable RDMA transfers (requires rdma feature build).
+                        PROVIDER: auto (default), cuobject, mock
 --version               Show version information
 ```
 

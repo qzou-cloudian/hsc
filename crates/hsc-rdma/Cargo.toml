@@ -1,0 +1,17 @@
+[package]
+name = "hsc-rdma"
+version = "0.2.0"
+edition = "2021"
+description = "RDMA provider implementations for hsc S3 CLI (SDK-agnostic)"
+license = "MIT"
+
+[features]
+# Enable runtime loading of the cuObject RDMA provider plugin (libhsc_rdma_cuobj.so).
+# The plugin is built from the hsc-rdma-cuobj crate and deployed alongside the
+# hsc binary.  No compile-time dependency on the cuObject SDK is required.
+cuobject = ["dep:libloading"]
+# Export C-ABI vtable entry point (for use as a cdylib plugin from C code)
+c-abi    = []
+
+[dependencies]
+libloading = { version = "0.8", optional = true }

@@ -108,8 +108,9 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8MB)
 --profile <name>        # AWS profile to use
 --region <region>       # AWS region
 --endpoint-url <url>    # Custom S3 endpoint
---no-verify-ssl         # Disable SSL verification
+--no-verify-ssl         # Disable SSL verification (not yet implemented)
 --debug                 # Enable debug output
+--rdma [PROVIDER]       # Enable RDMA transfers (requires rdma feature build)
 --version               # Show version
 ```
 
@@ -123,6 +124,7 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8MB)
 - `AWS_ENDPOINT_URL` - Custom endpoint URL
 - `AWS_CONFIG_FILE` - Config file location
 - `AWS_SHARED_CREDENTIALS_FILE` - Credentials file location
+- `HSC_RDMA` - RDMA provider: `auto`, `cuobject`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
 
 ## Advanced Features
 
@@ -188,6 +190,45 @@ hsc cmp ./myfile.txt s3://my-bucket/myfile.txt
 
 # Verify a specific byte range
 hsc cmp --range 0-999 ./header.bin s3://bucket/header.bin
+```
+
+### RDMA Transfers
+
+RDMA support accelerates large object transfers by allowing the S3 server to
+read/write directly into registered host (or GPU) memory, bypassing the CPU.
+
+Build with RDMA support:
+
+```bash
+# Mock provider (no hardware required, useful for testing)
+cargo build --release --features rdma
+
+# NVIDIA cuObject provider (requires cuObject SDK and libhsc_rdma_cuobj.so at runtime)
+cargo build --release --features cuobject
+```
+
+Enable RDMA at runtime:
+
+```bash
+# Auto-select best available provider
+hsc --rdma cp large-file.bin s3://bucket/
+
+# Use mock provider (for testing)
+hsc --rdma mock cp s3://bucket/file.bin ./
+
+# Via environment variable (applies to all commands)
+export HSC_RDMA=auto
+hsc cp large-file.bin s3://bucket/
+```
+
+Configure via `~/.aws/config`:
+
+```ini
+[default]
+rdma = auto       # enable RDMA, auto-select provider
+# rdma = cuobject # prefer cuObject provider
+# rdma = mock     # always use mock provider
+# rdma = false    # disable
 ```
 
 ## S3-Compatible Services

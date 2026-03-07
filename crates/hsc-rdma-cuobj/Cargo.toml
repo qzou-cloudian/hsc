@@ -1,0 +1,19 @@
+# Standalone cdylib — must NOT be a workspace member (would cause feature
+# unification: hsc-rdma/cuobject would activate for the whole workspace, which
+# re-introduces the hard link to libcuobjclient.so in the main hsc binary).
+[workspace]
+resolver = "2"
+
+[package]
+name        = "hsc-rdma-cuobj"
+version     = "0.2.0"
+edition     = "2021"
+description = "cuObject RDMA provider plugin for hsc (cdylib)"
+license     = "MIT"
+
+[lib]
+name       = "hsc_rdma_cuobj"
+crate-type = ["cdylib"]
+
+[dependencies]
+hsc-rdma = { path = "../hsc-rdma", features = ["cuobject", "c-abi"] }

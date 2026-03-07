@@ -4,6 +4,14 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
+#[cfg(feature = "rdma")]
+use crate::rdma::{RdmaInterceptor, RdmaProvider};
+#[cfg(feature = "rdma")]
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
+
 const CHUNK_SIZE: usize = 65536; // 64KB read buffer
 
 /// Compare two files or objects byte-by-byte, with optional range/offset/size.
@@ -15,6 +23,7 @@ pub async fn cmp(
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if range.is_some() && (offset.is_some() || size.is_some()) {
         return Err("Cannot specify both --range and --offset/--size".into());
@@ -22,8 +31,22 @@ pub async fn cmp(
 
     let (start, limit) = resolve_range(range, offset, size)?;
 
-    let mut reader1 = open_reader(client, path1, start, limit).await?;
-    let mut reader2 = open_reader(client, path2, start, limit).await?;
+    let mut reader1 = open_reader(
+        client,
+        path1,
+        start,
+        limit,
+        #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+    )
+    .await?;
+    let mut reader2 = open_reader(
+        client,
+        path2,
+        start,
+        limit,
+        #[cfg(feature = "rdma")] rdma,
+    )
+    .await?;
 
     let (size1, size2) = (reader1.total_size, reader2.total_size);
 
@@ -97,11 +120,7 @@ fn resolve_range(
     size: Option<u64>,
 ) -> Result<(Option<u64>, Option<u64>), Box<dyn std::error::Error>> {
     if let Some(range_str) = range {
-        let part = if range_str.starts_with("bytes=") {
-            &range_str[6..]
-        } else {
-            &range_str[..]
-        };
+        let part = range_str.strip_prefix("bytes=").unwrap_or(&range_str);
         let parts: Vec<&str> = part.split('-').collect();
         if parts.len() != 2 {
             return Err(format!("Invalid range '{}', expected 'start-end'", range_str).into());
@@ -149,6 +168,7 @@ async fn open_reader(
     path: &str,
     start: Option<u64>,
     limit: Option<u64>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<Reader, Box<dyn std::error::Error>> {
     match parse_path(path)? {
         PathType::Local(local_path) => {
@@ -183,13 +203,74 @@ async fn open_reader(
                 .map_err(|e| format!("Cannot stat s3://{}/{}: {}", bucket, key, e))?;
             let total_size = head.content_length().unwrap_or(0) as u64;
 
+            // Byte count for this particular request (may be a sub-range).
+            // Only used in the RDMA path below; suppress the warning for non-rdma builds.
+            #[cfg_attr(not(feature = "rdma"), allow(unused_variables))]
+            let byte_count = limit.unwrap_or(total_size) as usize;
+
             // Build Range header
             let range_hdr = build_range_header(start, limit);
+
+            // Try RDMA path when a provider is supplied.
+            #[cfg(feature = "rdma")]
+            if let Some(ref provider) = rdma {
+                let mut buffer: Vec<u8> = vec![0u8; byte_count];
+                let raw_ptr = buffer.as_mut_ptr(); // save before any potential move
+                let suitable =
+                    byte_count > 0 && provider.is_memory_suitable(buffer.as_ptr(), byte_count);
+                if suitable {
+                    let _ = provider.register_memory(buffer.as_mut_ptr(), byte_count);
+                }
+                let maybe_token = if suitable {
+                    let s3_key = format!("{}/{}", bucket, key);
+                    provider
+                        .prepare_get_token(
+                            s3_key.as_bytes(),
+                            buffer.as_mut_ptr(),
+                            byte_count,
+                            0,
+                        )
+                        .ok()
+                } else {
+                    None
+                };
+                let rdma_attempted = maybe_token.is_some();
+                let mut req = client.get_object().bucket(&bucket).key(&key);
+                if let Some(ref r) = range_hdr {
+                    req = req.range(r.clone());
+                }
+                let rdma_confirmed = Arc::new(AtomicBool::new(false));
+                let resp = if let Some(token) = maybe_token {
+                    let interceptor = RdmaInterceptor::new_get(
+                        Arc::clone(provider),
+                        token,
+                        byte_count,
+                        Arc::clone(&rdma_confirmed),
+                        false,
+                    );
+                    req.customize().interceptor(interceptor).send().await?
+                } else {
+                    req.send().await?
+                };
+                let bytes = if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
+                    buffer
+                } else {
+                    resp.body.collect().await?.into_bytes().to_vec()
+                };
+                // deregister via the raw pointer (buffer may have been moved into `bytes`)
+                if suitable {
+                    let _ = provider.deregister_memory(raw_ptr);
+                }
+                return Ok(Reader {
+                    inner: ReaderInner::S3 { data: bytes, pos: 0 },
+                    total_size,
+                });
+            }
+
             let mut req = client.get_object().bucket(&bucket).key(&key);
             if let Some(r) = range_hdr {
                 req = req.range(r);
             }
-
             let resp = req.send().await?;
             let bytes = resp.body.collect().await?.into_bytes().to_vec();
             Ok(Reader {

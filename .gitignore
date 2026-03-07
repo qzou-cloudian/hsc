@@ -2,6 +2,9 @@
 /target/
 Cargo.lock
 
+# Distribution artifacts
+/dist/
+
 # IDE
 .vscode/
 .idea/

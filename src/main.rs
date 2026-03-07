@@ -1,18 +1,26 @@
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod commands;
 mod filters;
 mod path_utils;
+#[cfg(feature = "rdma")]
+mod rdma;
 mod s3_client;
 
 #[derive(Parser)]
 #[command(name = "hsc")]
-#[command(version = env!("CARGO_PKG_VERSION"))]
-#[command(about = "AWS S3 CLI tool", long_about = None)]
+#[command(about = "High-performance S3 Client", long_about = None)]
 struct Cli {
     /// Enable debug output
     #[arg(long, global = true)]
     debug: bool,
+
+    /// Enable RDMA transfers.  PROVIDER may be `cuobject` or `mock`.
+    /// Omitting PROVIDER (bare `--rdma`) auto-selects the best available provider.
+    #[cfg(feature = "rdma")]
+    #[arg(long, global = true, num_args = 0..=1, value_name = "PROVIDER",
+          default_missing_value = "auto")]
+    rdma: Option<String>,
 
     /// Override the S3 endpoint URL
     #[arg(long, global = true)]
@@ -186,10 +194,37 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let cli = Cli::parse();
+    // Build rich version string and inject into clap before parsing.
+    let version: &'static str = {
+        let base = env!("CARGO_PKG_VERSION");
+        let s = {
+            #[cfg(feature = "rdma")]
+            { format!("{base}\n{}", rdma::rdma_provider_info()) }
+            #[cfg(not(feature = "rdma"))]
+            { format!("{base}\nRDMA providers: none (not built)") }
+        };
+        Box::leak(s.into_boxed_str())
+    };
+    let args: Vec<_> = std::env::args_os().collect();
+    let matches = Cli::command().version(version).get_matches_from(args);
+    let cli = Cli::from_arg_matches(&matches)?;
+
+    // Initialize tracing when --debug is set.  This enables aws_smithy_runtime's
+    // built-in trace instrumentation (request headers, response status, etc.).
+    // RUST_LOG can override the default filter.
+    if cli.debug {
+        use tracing_subscriber::EnvFilter;
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new("aws_smithy_runtime=trace")),
+            )
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     // Initialize S3 client with global options
-    let client_config = s3_client::S3ClientConfig {
+    let mut client_config = s3_client::S3ClientConfig {
         endpoint_url: cli.endpoint_url,
         region: cli.region,
         profile: cli.profile,
@@ -197,10 +232,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         debug: cli.debug,
         multipart_threshold: 8388608, // Will be loaded from config
         multipart_chunksize: 8388608, // Will be loaded from config
+        #[cfg(feature = "rdma")]
+        rdma_enabled: cli.rdma.is_some(),
+        #[cfg(not(feature = "rdma"))]
+        rdma_enabled: false,
+        #[cfg(feature = "rdma")]
+        rdma_mock: cli.rdma.as_deref() == Some("mock"),
+        #[cfg(not(feature = "rdma"))]
+        rdma_mock: false,
     };
+
+    // Resolve RDMA settings from env/config before cloning so the provider
+    // creation below sees the correct values.
+    s3_client::resolve_rdma_settings(&mut client_config);
 
     let client_config_clone = client_config.clone();
     let client = s3_client::create_s3_client(client_config).await?;
+
+    // Create an RDMA provider once if enabled; passed to every command that
+    // performs getObject / putObject / uploadPart.
+    #[cfg(feature = "rdma")]
+    let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaProvider>> =
+        if client_config_clone.rdma_enabled {
+            Some(rdma::create_provider(
+                client_config_clone.rdma_mock,
+                client_config_clone.debug,
+            ))
+        } else {
+            None
+        };
 
     match cli.command {
         Commands::Mb { bucket } => commands::mb::make_bucket(&client, &bucket).await,
@@ -228,6 +288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 checksum_algorithm,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
+                #[cfg(feature = "rdma")] rdma_provider,
             )
             .await
         }
@@ -245,6 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 exclude,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
+                #[cfg(feature = "rdma")] rdma_provider,
             )
             .await
         }
@@ -264,6 +326,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 exclude,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
+                #[cfg(feature = "rdma")] rdma_provider,
             )
             .await
         }
@@ -293,13 +356,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             range,
             offset,
             size,
-        } => commands::cat::cat(&client, &path, range, offset, size).await,
+        } => commands::cat::cat(
+            &client,
+            &path,
+            range,
+            offset,
+            size,
+            #[cfg(feature = "rdma")] rdma_provider,
+        )
+        .await,
         Commands::Cmp {
             path1,
             path2,
             range,
             offset,
             size,
-        } => commands::cmp::cmp(&client, &path1, &path2, range, offset, size).await,
+        } => commands::cmp::cmp(
+            &client,
+            &path1,
+            &path2,
+            range,
+            offset,
+            size,
+            #[cfg(feature = "rdma")] rdma_provider,
+        )
+        .await,
     }
 }

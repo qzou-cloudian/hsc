@@ -6,7 +6,19 @@
 # Don't exit on error - we want to count all failures
 set +e
 
-BINARY="./target/debug/hsc"
+# When HSC_RDMA is set to a non-false value, build and use the rdma-featured binary.
+if [[ -n "$HSC_RDMA" && "$HSC_RDMA" != "false" && "$HSC_RDMA" != "0" ]]; then
+    if [[ "$HSC_RDMA" == "cuobject" || "$HSC_RDMA" == "auto" ]]; then
+        echo "HSC_RDMA=$HSC_RDMA detected — building with --features cuobject ..."
+        cargo build --features cuobject 2>&1 | tail -3
+    else
+        echo "HSC_RDMA=$HSC_RDMA detected — building with --features rdma ..."
+        cargo build --features rdma 2>&1 | tail -3
+    fi
+    BINARY="./target/debug/hsc"
+else
+    BINARY="./target/debug/hsc"
+fi
 
 # Configuration from config file
 BUCKET_NAME="test-bucket-$(date +%s)"
@@ -52,6 +64,22 @@ info() {
     echo -e "${YELLOW}→ $1${NC}"
 }
 
+# Timing helpers
+SCRIPT_START=$SECONDS
+STEP_START=$SECONDS
+
+step_time() {
+    local elapsed=$((SECONDS - STEP_START))
+    local mins=$((elapsed / 60))
+    local secs=$((elapsed % 60))
+    if [ $mins -gt 0 ]; then
+        printf "${YELLOW}  ⏱  %dm %02ds${NC}\n" $mins $secs
+    else
+        echo -e "${YELLOW}  ⏱  ${secs}s${NC}"
+    fi
+    STEP_START=$SECONDS
+}
+
 # Function to create test file
 create_test_file() {
     local size=$1
@@ -79,6 +107,7 @@ else
 fi
 
 # Step 2: Create test files and upload objects
+step_time
 echo ""
 info "Step 2: Creating test files and uploading objects..."
 for size in "${SIZES[@]}"; do
@@ -101,6 +130,7 @@ info "Listing objects in bucket..."
 $BINARY ls "s3://$BUCKET_NAME"
 
 # Step 2b: Test Multipart Upload (via $BINARY cp for large files)
+step_time
 echo ""
 info "Step 2b: Testing Multipart Upload (via $BINARY cp)..."
 MULTIPART_SIZES=("1m" "16m" "32m")
@@ -162,6 +192,7 @@ info "Listing all objects (including multipart uploads)..."
 $BINARY ls "s3://$BUCKET_NAME"
 
 # Step 3: Download objects (full size) with integrity verification
+step_time
 echo ""
 info "Step 3: Downloading objects (full size) and verifying data integrity..."
 mkdir -p "$TEST_DIR/downloads"
@@ -225,6 +256,7 @@ for size in "${SIZES[@]}"; do
 done
 
 # Step 4: Test range requests with integrity verification using hsc cmp
+step_time
 echo ""
 info "Step 4: Testing range requests and verifying data integrity with 'hsc cmp'..."
 
@@ -384,6 +416,7 @@ else
 fi
 
 # Step 5: Delete all objects
+step_time
 echo ""
 info "Step 5: Deleting all objects..."
 for size in "${SIZES[@]}"; do
@@ -421,6 +454,7 @@ else
 fi
 
 # Step 6: Delete bucket
+step_time
 echo ""
 info "Step 6: Deleting bucket '$BUCKET_NAME'..."
 if $BINARY rb "s3://$BUCKET_NAME"; then
@@ -442,6 +476,8 @@ echo "========================================="
 echo -e "${BLUE}Total Tests Run: $((SUCCESS_COUNT + ERROR_COUNT))${NC}"
 echo -e "${GREEN}✓ Passed: $SUCCESS_COUNT${NC}"
 echo -e "${RED}✗ Failed: $ERROR_COUNT${NC}"
+_total=$((SECONDS - SCRIPT_START))
+printf "${BLUE}Total time: %dm %02ds${NC}\n" $((_total / 60)) $((_total % 60))
 echo "========================================="
 
 if [ $ERROR_COUNT -eq 0 ]; then

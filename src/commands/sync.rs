@@ -6,7 +6,13 @@ use std::path::Path;
 use tokio::fs;
 use walkdir::WalkDir;
 
+#[cfg(feature = "rdma")]
+use crate::rdma::RdmaProvider;
+#[cfg(feature = "rdma")]
+use std::sync::Arc;
+
 /// Synchronize directories (copy only changed/new files)
+#[allow(clippy::too_many_arguments)]
 pub async fn sync(
     client: &Client,
     source: &str,
@@ -15,6 +21,7 @@ pub async fn sync(
     exclude: Vec<String>,
     multipart_threshold: u64,
     multipart_chunksize: u64,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source_type = parse_path(source)?;
     let dest_type = parse_path(dest)?;
@@ -30,11 +37,20 @@ pub async fn sync(
                 &filter,
                 multipart_threshold,
                 multipart_chunksize,
+                #[cfg(feature = "rdma")] rdma,
             )
             .await
         }
         (PathType::S3 { bucket, key }, PathType::Local(dst)) => {
-            sync_s3_to_local(client, bucket, key, dst, &filter).await
+            sync_s3_to_local(
+                client,
+                bucket,
+                key,
+                dst,
+                &filter,
+                #[cfg(feature = "rdma")] rdma,
+            )
+            .await
         }
         (
             PathType::S3 {
@@ -53,6 +69,7 @@ pub async fn sync(
 }
 
 /// Sync local directory to S3
+#[allow(clippy::too_many_arguments)]
 async fn sync_local_to_s3(
     client: &Client,
     local_dir: &str,
@@ -61,6 +78,7 @@ async fn sync_local_to_s3(
     filter: &FileFilter,
     multipart_threshold: u64,
     multipart_chunksize: u64,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::upload_file;
 
@@ -106,6 +124,7 @@ async fn sync_local_to_s3(
                     None,
                     multipart_threshold,
                     multipart_chunksize,
+                    #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
                 )
                 .await?;
                 synced_count += 1;
@@ -129,6 +148,7 @@ async fn sync_s3_to_local(
     prefix: &str,
     local_dir: &str,
     filter: &FileFilter,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::download_file;
 
@@ -151,7 +171,6 @@ async fn sync_s3_to_local(
 
         for obj in response.contents() {
             if let Some(key) = obj.key() {
-                // Apply filters
                 if !filter.matches(key) {
                     continue;
                 }
@@ -164,7 +183,6 @@ async fn sync_s3_to_local(
 
                 let local_path = Path::new(local_dir).join(relative_key);
 
-                // Check if file needs to be synced
                 let needs_sync = if local_path.exists() {
                     let local_size = fs::metadata(&local_path).await?.len() as i64;
                     let s3_size = obj.size().unwrap_or(0);
@@ -174,7 +192,15 @@ async fn sync_s3_to_local(
                 };
 
                 if needs_sync {
-                    download_file(client, bucket, key, local_path.to_str().unwrap(), None).await?;
+                    download_file(
+                        client,
+                        bucket,
+                        key,
+                        local_path.to_str().unwrap(),
+                        None,
+                        #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+                    )
+                    .await?;
                     synced_count += 1;
                 } else {
                     skipped_count += 1;
