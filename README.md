@@ -1,11 +1,15 @@
 # hsc - High-Performance S3 CLI
 
 A fast, feature-rich command-line tool for AWS S3 and S3-compatible storage, written in Rust.
+hsc supports **RDMA-accelerated transfers** via the NVIDIA cuObject API, enabling GPU-direct
+data paths that bypass the CPU and system memory for dramatically higher throughput when
+moving data between S3-compatible object storage and GPU memory.
 
 
 ## Features
 
 - **11 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`
+- **RDMA Transfers**: GPU-direct data paths via NVIDIA cuObject — zero-copy between object storage and GPU memory
 - **Multipart Upload**: Automatic multipart transfers for large files with configurable thresholds
 - **Checksum Validation**: Support for CRC32, CRC32C, SHA1, and SHA256
 - **Smart Filtering**: Include/exclude patterns using glob syntax
