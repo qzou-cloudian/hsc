@@ -33,7 +33,7 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 
-use hsc_rdma::RdmaProvider;
+use s3_rdma::RdmaProvider;
 
 // ── RdmaInterceptor ──────────────────────────────────────────────────────────
 
