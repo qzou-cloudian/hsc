@@ -48,7 +48,7 @@ impl Default for S3ClientConfig {
 /// - AWS_SECRET_ACCESS_KEY: Secret access key
 /// - AWS_SESSION_TOKEN: Session token (for temporary credentials)
 /// - HSC_RDMA: RDMA provider selection.  Accepted values:
-///   `cuobject` or `auto` (enable, auto-select provider), `mock` (use mock provider),
+///   `cuobj` or `auto` (enable, auto-select provider), `mock` (use mock provider),
 ///   `true`/`1` (same as `auto`), `false`/`0` (disable).
 /// - HSC_RDMA_MOCK: Set to `true` or `1` to use mock RDMA provider
 pub async fn create_s3_client(
@@ -183,7 +183,7 @@ fn load_multipart_settings(profile: &str) -> Result<(u64, u64), Box<dyn std::err
 /// Priority: CLI flag (already on config) > `HSC_RDMA` env > config file > default false.
 ///
 /// The `rdma` key in the config file accepts the same values as `HSC_RDMA`:
-/// `auto`, `cuobject`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
+/// `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
 pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
     if config.rdma_enabled || config.rdma_mock {
         return; // CLI flags already set
@@ -195,7 +195,7 @@ pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
         .unwrap_or_else(|| "default".to_string());
     let cfg_settings = load_rdma_settings(&profile);
 
-    // HSC_RDMA accepts: mock, cuobject, auto, true, 1, false, 0
+    // HSC_RDMA accepts: mock, cuobj, auto, true, 1, false, 0
     let (env_enabled, env_mock) = env::var("HSC_RDMA")
         .map(|v| parse_rdma_provider_value(&v))
         .unwrap_or((false, false));
@@ -305,13 +305,13 @@ fn profile_section_header(profile: &str) -> String {
 /// | Value                         | rdma_enabled | use_mock |
 /// |-------------------------------|:------------:|:--------:|
 /// | `mock`                        | true         | true     |
-/// | `cuobject`, `auto`, `true`,   | true         | false    |
+/// | `cuobj`, `auto`, `true`,   | true         | false    |
 /// | `1`, `yes`, `on`              |              |          |
 /// | `false`, `0`, `no`, `off`, …  | false        | false    |
 fn parse_rdma_provider_value(value: &str) -> (bool, bool) {
     match value.to_lowercase().as_str() {
         "mock" => (true, true),
-        "cuobject" | "auto" | "true" | "1" | "yes" | "on" => (true, false),
+        "cuobj" | "auto" | "true" | "1" | "yes" | "on" => (true, false),
         _ => (false, false),
     }
 }

@@ -8,9 +8,9 @@ set +e
 
 # When HSC_RDMA is set to a non-false value, build and use the rdma-featured binary.
 if [[ -n "$HSC_RDMA" && "$HSC_RDMA" != "false" && "$HSC_RDMA" != "0" ]]; then
-    if [[ "$HSC_RDMA" == "cuobject" || "$HSC_RDMA" == "auto" ]]; then
-        echo "HSC_RDMA=$HSC_RDMA detected — building with --features cuobject ..."
-        cargo build --features cuobject 2>&1 | tail -3
+    if [[ "$HSC_RDMA" == "cuobj" || "$HSC_RDMA" == "auto" ]]; then
+        echo "HSC_RDMA=$HSC_RDMA detected — building with --features cuobj ..."
+        cargo build --features cuobj 2>&1 | tail -3
     else
         echo "HSC_RDMA=$HSC_RDMA detected — building with --features rdma ..."
         cargo build --features rdma 2>&1 | tail -3

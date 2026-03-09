@@ -127,7 +127,7 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8MB)
 - `AWS_ENDPOINT_URL` - Custom endpoint URL
 - `AWS_CONFIG_FILE` - Config file location
 - `AWS_SHARED_CREDENTIALS_FILE` - Credentials file location
-- `HSC_RDMA` - RDMA provider: `auto`, `cuobject`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- `HSC_RDMA` - RDMA provider: `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
 
 ## Advanced Features
 
@@ -207,7 +207,7 @@ Build with RDMA support:
 cargo build --release --features rdma
 
 # NVIDIA cuObject provider (requires cuObject SDK and libhsc_rdma_cuobj.so at runtime)
-cargo build --release --features cuobject
+cargo build --release --features cuobj
 ```
 
 Enable RDMA at runtime:
@@ -229,7 +229,7 @@ Configure via `~/.aws/config`:
 ```ini
 [default]
 rdma = auto       # enable RDMA, auto-select provider
-# rdma = cuobject # prefer cuObject provider
+# rdma = cuobj # prefer cuObject provider
 # rdma = mock     # always use mock provider
 # rdma = false    # disable
 ```

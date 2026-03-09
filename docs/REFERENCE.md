@@ -13,7 +13,7 @@ Available for all commands:
 --no-verify-ssl         Disable SSL certificate verification (not yet implemented)
 --debug                 Enable debug logging
 --rdma [PROVIDER]       Enable RDMA transfers (requires rdma feature build).
-                        PROVIDER: auto (default), cuobject, mock
+                        PROVIDER: auto (default), cuobj, mock
 --version               Show version information
 ```
 
