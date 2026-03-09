@@ -17,14 +17,17 @@
 
 # ── Configurable variables ────────────────────────────────────────────────────
 
-# Cargo features to enable (cuobject | rdma | <empty>)
-FEATURES   ?= cuobject
+# Cargo features to enable (cuobj | rdma | <empty>)
+FEATURES   ?= cuobj
 
 # CUDA / cuObject SDK root on the host (must contain include/cuobjclient.h)
 CUDA_DIR   ?= /usr/local/cuda-13.2
 
-# Path to the cuobject Rust source tree (needed for the cuobject crate path dep)
-CUOBJ_SRC  ?= $(abspath ../cuobject)
+# Path to the cuobj Rust source tree (needed for the cuobj crate path dep)
+CUOBJ_SRC  ?= $(abspath ../cuobj)
+
+# Path to the s3-rdma Rust source tree (needed for the s3-rdma crate path dep)
+S3RDMA_SRC ?= $(abspath ../s3-rdma)
 
 # ── Internal variables ────────────────────────────────────────────────────────
 
@@ -45,15 +48,15 @@ ROCKY_VOL      := hsc-target-rocky-8
 define BUILD_CMD
 set -e; \
 cd /build/hsc; \
-CUOBJECT_ROOT_DIR=/usr/local/cuda \
+CUOBJ_ROOT_DIR=/usr/local/cuda \
 cargo build --release $(if $(FEATURES),--features $(FEATURES)) \
     --target-dir /cargo/target; \
 cp /cargo/target/release/hsc /out/; \
-if echo "$(FEATURES)" | grep -q cuobject; then \
+if echo "$(FEATURES)" | grep -q cuobj; then \
     cargo build --release \
-        --manifest-path crates/hsc-rdma-cuobj/Cargo.toml \
+        --manifest-path ../s3-rdma/providers/cuobj/Cargo.toml \
         --target-dir /cargo/target-cuobj; \
-    cp /cargo/target-cuobj/release/libhsc_rdma_cuobj.so /out/; \
+    cp /cargo/target-cuobj/release/libs3_rdma_cuobj.so /out/; \
 fi
 endef
 
@@ -61,7 +64,8 @@ endef
 define DOCKER_RUN_FLAGS
 --rm \
 -v "$(HSC_DIR):/build/hsc:ro" \
--v "$(CUOBJ_SRC):/build/cuobject:ro" \
+-v "$(CUOBJ_SRC):/build/cuobj:ro" \
+-v "$(S3RDMA_SRC):/build/s3-rdma:ro" \
 -v "$(CUDA_DIR):/usr/local/cuda:ro" \
 -v "$(CARGO_REGISTRY):/root/.cargo/registry" \
 -v "$(CARGO_GIT):/root/.cargo/git"
@@ -114,16 +118,17 @@ help:
 	@echo "  clean-volumes  Remove Docker build-cache volumes (forces full Cargo rebuild)"
 	@echo ""
 	@echo "Variables (override on command line):"
-	@echo "  FEATURES   Cargo features  [default: cuobject]"
-	@echo "             cuobject  — RDMA via NVIDIA cuObject SDK (requires CUDA_DIR)"
+	@echo "  FEATURES   Cargo features  [default: cuobj]"
+	@echo "             cuobj  — RDMA via NVIDIA cuObject SDK (requires CUDA_DIR)"
 	@echo "             rdma      — RDMA mock only (no CUDA needed)"
 	@echo "             (empty)   — no RDMA support"
 	@echo "  CUDA_DIR   CUDA/cuObject SDK root  [default: /usr/local/cuda-13.2]"
-	@echo "  CUOBJ_SRC  cuobject Rust source tree  [default: ../cuobject]"
+	@echo "  CUOBJ_SRC  cuobj Rust source tree  [default: ../cuobj]"
+	@echo "  S3RDMA_SRC s3-rdma Rust source tree  [default: ../s3-rdma]"
 	@echo ""
 	@echo "Output:"
 	@echo "  dist/ubuntu-24.04/hsc"
-	@echo "  dist/ubuntu-24.04/libhsc_rdma_cuobj.so  (when FEATURES=cuobject)"
+	@echo "  dist/ubuntu-24.04/libs3_rdma_cuobj.so  (when FEATURES=cuobj)"
 	@echo "  dist/rocky-8/hsc"
-	@echo "  dist/rocky-8/libhsc_rdma_cuobj.so        (when FEATURES=cuobject)"
+	@echo "  dist/rocky-8/libs3_rdma_cuobj.so        (when FEATURES=cuobj)"
 	@echo ""
