@@ -2,6 +2,8 @@ use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use std::env;
 
+use crate::debug_interceptor::DebugInterceptor;
+
 /// Configuration for S3 client creation
 #[derive(Clone)]
 pub struct S3ClientConfig {
@@ -12,12 +14,9 @@ pub struct S3ClientConfig {
     pub debug: bool,
     pub multipart_threshold: u64,
     pub multipart_chunksize: u64,
-    /// Enable cuObject RDMA header injection on PUT/GET requests.
+    /// Normalized RDMA provider name (`"mock"`, `"cuobj"`), or `None` to disable RDMA.
     #[allow(dead_code)]
-    pub rdma_enabled: bool,
-    /// Use the mock RDMA provider instead of cuObject (for testing).
-    #[allow(dead_code)]
-    pub rdma_mock: bool,
+    pub rdma_provider: Option<String>,
 }
 
 impl Default for S3ClientConfig {
@@ -30,8 +29,7 @@ impl Default for S3ClientConfig {
             debug: false,
             multipart_threshold: 8388608, // 8MB default
             multipart_chunksize: 8388608, // 8MB default
-            rdma_enabled: false,
-            rdma_mock: false,
+            rdma_provider: None,
         }
     }
 }
@@ -51,6 +49,7 @@ impl Default for S3ClientConfig {
 ///   `cuobj` or `auto` (enable, auto-select provider), `mock` (use mock provider),
 ///   `true`/`1` (same as `auto`), `false`/`0` (disable).
 /// - HSC_RDMA_MOCK: Set to `true` or `1` to use mock RDMA provider
+/// - HSC_DEBUG: Set to a non-empty value to enable request/response header logging
 pub async fn create_s3_client(
     mut config: S3ClientConfig,
 ) -> Result<Client, Box<dyn std::error::Error>> {
@@ -124,8 +123,10 @@ pub async fn create_s3_client(
         eprintln!("Warning: --no-verify-ssl is not yet implemented; SSL verification remains enabled");
     }
 
-    // HTTP request/response tracing is handled by aws_smithy_runtime via the
-    // tracing subscriber initialised in main() when --debug is enabled.
+    // Attach DebugInterceptor when debug mode is enabled.
+    if config.debug {
+        s3_config_builder = s3_config_builder.interceptor(DebugInterceptor::default());
+    }
 
     let s3_config = s3_config_builder.build();
 
@@ -185,42 +186,44 @@ fn load_multipart_settings(profile: &str) -> Result<(u64, u64), Box<dyn std::err
 /// The `rdma` key in the config file accepts the same values as `HSC_RDMA`:
 /// `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
 pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
-    if config.rdma_enabled || config.rdma_mock {
-        return; // CLI flags already set
+    if config.rdma_provider.is_some() {
+        // Normalize the CLI-provided value (e.g. "auto" → "cuobj").
+        config.rdma_provider = config.rdma_provider.as_deref().and_then(parse_rdma_provider_value);
+        return;
     }
     let profile = config
         .profile
         .clone()
         .or_else(|| env::var("AWS_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
-    let cfg_settings = load_rdma_settings(&profile);
+    let cfg_setting = load_rdma_settings(&profile);
 
     // HSC_RDMA accepts: mock, cuobj, auto, true, 1, false, 0
-    let (env_enabled, env_mock) = env::var("HSC_RDMA")
-        .map(|v| parse_rdma_provider_value(&v))
-        .unwrap_or((false, false));
+    let env_provider = env::var("HSC_RDMA")
+        .ok()
+        .and_then(|v| parse_rdma_provider_value(&v));
 
-    config.rdma_enabled = env_enabled || cfg_settings.0;
-    config.rdma_mock = env_mock || cfg_settings.1;
+    // env takes priority over config file
+    config.rdma_provider = env_provider.or(cfg_setting);
 
-    if config.debug && (config.rdma_enabled || config.rdma_mock) {
+    if config.debug && config.rdma_provider.is_some() {
         eprintln!(
-            "Debug: RDMA settings - rdma_enabled: {}, rdma_mock: {}",
-            config.rdma_enabled, config.rdma_mock
+            "Debug: RDMA settings - provider: {:?}",
+            config.rdma_provider
         );
     }
 }
 
 /// Load RDMA settings from the AWS config file for the given profile.
-fn load_rdma_settings(profile: &str) -> (bool, bool) {
+fn load_rdma_settings(profile: &str) -> Option<String> {
     let content = match read_aws_config_file() {
         Ok(c) => c,
-        Err(_) => return (false, false),
+        Err(_) => return None,
     };
 
     let mut in_profile_section = false;
     let mut in_s3_section = false;
-    let mut result: Option<(bool, bool)> = None;
+    let mut result: Option<String> = None;
 
     let profile_header = profile_section_header(profile);
 
@@ -234,13 +237,13 @@ fn load_rdma_settings(profile: &str) -> (bool, bool) {
         if in_profile_section || in_s3_section {
             if let Some((key, value)) = line.split_once('=') {
                 if key.trim() == "rdma" {
-                    result = Some(parse_rdma_provider_value(value.trim()));
+                    result = parse_rdma_provider_value(value.trim());
                 }
             }
         }
     }
 
-    result.unwrap_or((false, false))
+    result
 }
 
 /// Parse size value from config (e.g., "8MB", "10485760", "5M")
@@ -300,18 +303,18 @@ fn profile_section_header(profile: &str) -> String {
     }
 }
 
-/// Parse an RDMA provider value into `(rdma_enabled, use_mock)`.
+/// Parse an RDMA provider value into a normalized provider name.
 ///
-/// | Value                         | rdma_enabled | use_mock |
-/// |-------------------------------|:------------:|:--------:|
-/// | `mock`                        | true         | true     |
-/// | `cuobj`, `auto`, `true`,   | true         | false    |
-/// | `1`, `yes`, `on`              |              |          |
-/// | `false`, `0`, `no`, `off`, …  | false        | false    |
-fn parse_rdma_provider_value(value: &str) -> (bool, bool) {
+/// | Value                         | Result          |
+/// |-------------------------------|-----------------|
+/// | `mock`                        | `Some("mock")`  |
+/// | `cuobj`, `auto`, `true`,      | `Some("cuobj")` |
+/// | `1`, `yes`, `on`              |                 |
+/// | `false`, `0`, `no`, `off`, …  | `None`          |
+fn parse_rdma_provider_value(value: &str) -> Option<String> {
     match value.to_lowercase().as_str() {
-        "mock" => (true, true),
-        "cuobj" | "auto" | "true" | "1" | "yes" | "on" => (true, false),
-        _ => (false, false),
+        "mock" => Some("mock".to_owned()),
+        "cuobj" | "auto" | "true" | "1" | "yes" | "on" => Some("cuobj".to_owned()),
+        _ => None,
     }
 }

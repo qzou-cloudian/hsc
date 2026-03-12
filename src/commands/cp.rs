@@ -15,6 +15,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+#[cfg(feature = "rdma")]
+use base64::Engine as _;
 
 /// Copy files between local and S3
 #[allow(clippy::too_many_arguments)]
@@ -25,8 +27,7 @@ pub async fn copy(
     recursive: bool,
     include: Vec<String>,
     exclude: Vec<String>,
-    checksum_mode: Option<String>,
-    checksum_algorithm: Option<String>,
+    checksum: Option<String>,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -36,10 +37,10 @@ pub async fn copy(
 
     // Parse checksum options (only for single object operations)
     let checksum_opts = if !recursive {
-        parse_checksum_options(checksum_mode, checksum_algorithm)?
+        parse_checksum(checksum)?
     } else {
-        if checksum_mode.is_some() || checksum_algorithm.is_some() {
-            eprintln!("Warning: Checksum options are ignored for recursive operations");
+        if checksum.is_some() {
+            eprintln!("Warning: Checksum option is ignored for recursive operations");
         }
         (None, None)
     };
@@ -71,38 +72,24 @@ pub async fn copy(
     }
 }
 
-/// Parse checksum options
-fn parse_checksum_options(
-    mode: Option<String>,
-    algorithm: Option<String>,
+/// Parse checksum option into (mode, algorithm) pair
+fn parse_checksum(
+    checksum: Option<String>,
 ) -> Result<(Option<ChecksumMode>, Option<ChecksumAlgorithm>), String> {
-    let checksum_mode = if let Some(m) = mode {
-        match m.to_uppercase().as_str() {
-            "ENABLED" => Some(ChecksumMode::Enabled),
-            _ => return Err(format!("Invalid checksum mode: {}. Use ENABLED", m)),
-        }
-    } else {
-        None
+    let Some(val) = checksum else {
+        return Ok((None, None));
     };
-
-    let checksum_algo = if let Some(a) = algorithm {
-        match a.to_uppercase().as_str() {
-            "CRC32" => Some(ChecksumAlgorithm::Crc32),
-            "CRC32C" => Some(ChecksumAlgorithm::Crc32C),
-            "SHA1" => Some(ChecksumAlgorithm::Sha1),
-            "SHA256" => Some(ChecksumAlgorithm::Sha256),
-            _ => {
-                return Err(format!(
-                    "Invalid checksum algorithm: {}. Use CRC32, CRC32C, SHA1, or SHA256",
-                    a
-                ))
-            }
-        }
-    } else {
-        None
-    };
-
-    Ok((checksum_mode, checksum_algo))
+    match val.to_uppercase().as_str() {
+        "ENABLED" => Ok((Some(ChecksumMode::Enabled), None)),
+        "CRC32" => Ok((Some(ChecksumMode::Enabled), Some(ChecksumAlgorithm::Crc32))),
+        "CRC32C" => Ok((Some(ChecksumMode::Enabled), Some(ChecksumAlgorithm::Crc32C))),
+        "SHA1" => Ok((Some(ChecksumMode::Enabled), Some(ChecksumAlgorithm::Sha1))),
+        "SHA256" => Ok((Some(ChecksumMode::Enabled), Some(ChecksumAlgorithm::Sha256))),
+        _ => Err(format!(
+            "Invalid checksum value: {}. Use ENABLED, CRC32, CRC32C, SHA1, or SHA256",
+            val
+        )),
+    }
 }
 
 /// Copy a single file
@@ -167,6 +154,48 @@ async fn copy_single(
     }
 }
 
+/// Compute a base64-encoded checksum of `data` using the requested algorithm.
+///
+/// Returns `(algorithm_name, base64_value)` when checksum mode is enabled,
+/// or `(None, None)` when checksums are not requested.
+#[cfg(feature = "rdma")]
+fn compute_put_checksum(
+    data: &[u8],
+    checksum_mode: Option<&ChecksumMode>,
+    checksum_algorithm: Option<&ChecksumAlgorithm>,
+) -> (Option<String>, Option<String>) {
+    use sha1::Digest;
+
+    if checksum_mode.is_none() {
+        return (None, None);
+    }
+    let algo = checksum_algorithm.unwrap_or(&ChecksumAlgorithm::Crc32);
+    let (name, bytes): (&str, Vec<u8>) = match algo {
+        ChecksumAlgorithm::Crc32 => {
+            let mut h = crc32fast::Hasher::new();
+            h.update(data);
+            ("CRC32", h.finalize().to_be_bytes().to_vec())
+        }
+        ChecksumAlgorithm::Crc32C => {
+            let checksum = crc32c::crc32c(data);
+            ("CRC32C", checksum.to_be_bytes().to_vec())
+        }
+        ChecksumAlgorithm::Sha1 => {
+            let mut h = sha1::Sha1::new();
+            h.update(data);
+            ("SHA1", h.finalize().to_vec())
+        }
+        ChecksumAlgorithm::Sha256 => {
+            let mut h = sha2::Sha256::new();
+            h.update(data);
+            ("SHA256", h.finalize().to_vec())
+        }
+        _ => return (None, None),
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    (Some(name.to_string()), Some(encoded))
+}
+
 /// Upload a file to S3
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_file(
@@ -222,16 +251,28 @@ pub async fn upload_file(
             } else {
                 None
             };
-            let body = ByteStream::from(buffer.clone());
+            // For RDMA transfers the data travels via RDMA, not the HTTP body.
+            // Use an empty body so content-length is 0 and x-amz-content-sha256
+            // reflects SHA256 of the empty string, as the server expects.
+            let rdma_body = ByteStream::from_static(b"");
             if let Some(token) = maybe_token {
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
-                let interceptor =
-                    RdmaInterceptor::new_put(Arc::clone(provider), token, size, rdma_confirmed, false);
+                let (cksum_alg, cksum_val) =
+                    compute_put_checksum(&buffer, checksum_mode.as_ref(), checksum_algorithm.as_ref());
+                let interceptor = RdmaInterceptor::new_put(
+                    Arc::clone(provider),
+                    token,
+                    size,
+                    rdma_confirmed,
+                    false,
+                    cksum_alg,
+                    cksum_val,
+                );
                 client
                     .put_object()
                     .bucket(bucket)
                     .key(key)
-                    .body(body)
+                    .body(rdma_body)
                     .customize()
                     .interceptor(interceptor)
                     .send()
@@ -241,7 +282,7 @@ pub async fn upload_file(
                     .put_object()
                     .bucket(bucket)
                     .key(key)
-                    .body(body)
+                    .body(rdma_body)
                     .send()
                     .await?;
             }
@@ -299,71 +340,135 @@ async fn upload_file_multipart(
     let mut part_number = 1;
     let mut uploaded_bytes = 0u64;
 
+    // RDMA: allocate the part buffer once before the loop so the same memory
+    // region (at a stable virtual address) is reused for every part.
+    // Allocating a fresh Vec each iteration risks later parts landing in pages
+    // outside the CUDA-accessible region on cuobj hardware, causing
+    // prepare_put_token to fail silently and losing the RDMA token.
+    //
+    // register_memory / deregister_memory are still called per-part because
+    // providers such as MockRdmaProvider create one SHM file per registration:
+    // after process_reply_token confirms a part the SHM entry is removed, so
+    // the buffer must be re-registered before the next prepare_put_token.
+    // For cuobj both functions are no-ops (real registration happens inside
+    // prepare_put_token), so the extra calls cost nothing.
+    #[cfg(feature = "rdma")]
+    let (mut rdma_buffer, rdma_memory_ok) = if let Some(ref provider) = rdma {
+        let buf = vec![0u8; chunk_size as usize];
+        let ok = provider.is_memory_suitable(buf.as_ptr(), chunk_size as usize);
+        (buf, ok)
+    } else {
+        (Vec::new(), false)
+    };
+
     loop {
-        let mut buffer = vec![0u8; chunk_size as usize];
-        let mut bytes_read = 0;
+        let bytes_read;
 
-        // Read chunk_size bytes
-        while bytes_read < chunk_size as usize {
-            let n = file.read(&mut buffer[bytes_read..]).await?;
-            if n == 0 {
-                break; // EOF
+        #[cfg(feature = "rdma")]
+        let part_data: Option<Vec<u8>>; // Some(_) only for the non-RDMA HTTP path
+
+        // Read the next chunk into the pre-allocated RDMA buffer (RDMA path)
+        // or a fresh allocation (plain HTTP path).
+        #[cfg(feature = "rdma")]
+        {
+            if rdma.is_some() {
+                let mut n_read = 0usize;
+                while n_read < chunk_size as usize {
+                    let n = file.read(&mut rdma_buffer[n_read..]).await?;
+                    if n == 0 { break; }
+                    n_read += n;
+                }
+                if n_read == 0 { break; }
+                bytes_read = n_read;
+                part_data = None;
+            } else {
+                let mut buffer = vec![0u8; chunk_size as usize];
+                let mut n_read = 0usize;
+                while n_read < chunk_size as usize {
+                    let n = file.read(&mut buffer[n_read..]).await?;
+                    if n == 0 { break; }
+                    n_read += n;
+                }
+                if n_read == 0 { break; }
+                buffer.truncate(n_read);
+                bytes_read = n_read;
+                part_data = Some(buffer);
             }
-            bytes_read += n;
         }
-
-        if bytes_read == 0 {
-            break; // No more data
+        #[cfg(not(feature = "rdma"))]
+        {
+            let mut buffer = vec![0u8; chunk_size as usize];
+            let mut n_read = 0usize;
+            while n_read < chunk_size as usize {
+                let n = file.read(&mut buffer[n_read..]).await?;
+                if n == 0 { break; }
+                n_read += n;
+            }
+            if n_read == 0 { break; }
+            buffer.truncate(n_read);
+            bytes_read = n_read;
         }
-
-        // Trim buffer to actual size read
-        buffer.truncate(bytes_read);
 
         // Upload this part — with RDMA interceptor when a provider is present.
         #[cfg(feature = "rdma")]
         let upload_part_response = {
-            let body = ByteStream::from(buffer.clone());
             if let Some(ref provider) = rdma {
-                let suitable = provider.is_memory_suitable(buffer.as_ptr(), bytes_read);
-                if suitable {
-                    let _ = provider.register_memory(buffer.as_mut_ptr(), bytes_read);
-                }
-                let maybe_token = if suitable {
+                // Register the buffer for this part.  This is a no-op for cuobj
+                // (real registration is inside prepare_put_token) but creates the
+                // SHM entry the mock provider needs for each transfer.
+                let registered = rdma_memory_ok
+                    && provider.register_memory(rdma_buffer.as_mut_ptr(), bytes_read).is_ok();
+
+                let maybe_token = if registered {
                     let s3_key = format!("{bucket}/{key}");
                     provider
-                        .prepare_put_token(s3_key.as_bytes(), buffer.as_ptr(), bytes_read, 0)
+                        .prepare_put_token(s3_key.as_bytes(), rdma_buffer.as_ptr(), bytes_read, 0)
                         .ok()
                 } else {
                     None
                 };
+
                 let resp = if let Some(token) = maybe_token {
                     let rdma_confirmed = Arc::new(AtomicBool::new(false));
-                    let interceptor =
-                        RdmaInterceptor::new_put(Arc::clone(provider), token, bytes_read, rdma_confirmed, false);
+                    let interceptor = RdmaInterceptor::new_put(
+                        Arc::clone(provider),
+                        token,
+                        bytes_read,
+                        rdma_confirmed,
+                        false,
+                        None,
+                        None,
+                    );
                     client
                         .upload_part()
                         .bucket(bucket)
                         .key(key)
                         .upload_id(upload_id)
                         .part_number(part_number)
-                        .body(body)
+                        .body(ByteStream::from_static(b""))
                         .customize()
                         .interceptor(interceptor)
                         .send()
                         .await?
                 } else {
+                    // RDMA token unavailable — fall back to plain HTTP body.
+                    let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
                     client
                         .upload_part()
                         .bucket(bucket)
                         .key(key)
                         .upload_id(upload_id)
                         .part_number(part_number)
-                        .body(body)
+                        .body(ByteStream::from(body))
                         .send()
                         .await?
                 };
-                if suitable {
-                    let _ = provider.deregister_memory(buffer.as_mut_ptr());
+
+                // Deregister the buffer.  If process_reply_token already cleaned
+                // up the entry (RDMA confirmed), this is a no-op.  For cuobj this
+                // call is always a no-op.
+                if registered {
+                    let _ = provider.deregister_memory(rdma_buffer.as_mut_ptr());
                 }
                 resp
             } else {
@@ -373,21 +478,20 @@ async fn upload_file_multipart(
                     .key(key)
                     .upload_id(upload_id)
                     .part_number(part_number)
-                    .body(body)
+                    .body(ByteStream::from(part_data.unwrap()))
                     .send()
                     .await?
             }
         };
         #[cfg(not(feature = "rdma"))]
         let upload_part_response = {
-            let body = ByteStream::from(buffer);
             client
                 .upload_part()
                 .bucket(bucket)
                 .key(key)
                 .upload_id(upload_id)
                 .part_number(part_number)
-                .body(body)
+                .body(ByteStream::from(buffer))
                 .send()
                 .await?
         };
