@@ -29,7 +29,6 @@ pub async fn move_files(
         include.clone(),
         exclude.clone(),
         None, // No checksum for move operations
-        None,
         multipart_threshold,
         multipart_chunksize,
         #[cfg(feature = "rdma")] rdma,

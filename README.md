@@ -152,10 +152,10 @@ Validate data integrity with checksums:
 
 ```bash
 # Calculate checksums for local files
-hsc stat myfile.txt --checksum-mode ENABLED --checksum-algorithm SHA256
+hsc stat myfile.txt --checksum SHA256
 
 # Verify S3 object checksums
-hsc cp file.txt s3://bucket/ --checksum-algorithm CRC32C
+hsc cp file.txt s3://bucket/ --checksum CRC32C
 ```
 
 ### Range Reads
@@ -258,7 +258,7 @@ hsc sync --exclude "*.tmp" --exclude ".git/*" ./myproject s3://backups/myproject
 ### Download large file with verification
 
 ```bash
-hsc cp s3://bucket/large-file.zip ./ --checksum-mode ENABLED
+hsc cp s3://bucket/large-file.zip ./ --checksum
 ```
 
 ### Mirror S3 bucket

@@ -201,8 +201,7 @@ hsc cp --recursive \
 ### Copy with Checksum Validation
 ```bash
 hsc cp important-file.dat s3://my-bucket/important-file.dat \
-       --checksum-mode ENABLED \
-       --checksum-algorithm SHA256
+       --checksum SHA256
 ```
 
 ### Large Directory Upload
@@ -615,7 +614,7 @@ fi
 ```bash
 # Upload with checksum
 hsc cp important.dat s3://bucket/important.dat \
-    --checksum-mode ENABLED --checksum-algorithm SHA256
+    --checksum SHA256
 
 # Check the checksum was stored
 hsc stat s3://bucket/important.dat | grep SHA256

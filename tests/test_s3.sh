@@ -121,9 +121,9 @@ test_cp_single() {
 }
 
 test_cp_with_checksum() {
-    echo -e "\n${YELLOW}Test 4: Copy with Checksum (cp --checksum-mode --checksum-algorithm)${NC}"
+    echo -e "\n${YELLOW}Test 4: Copy with Checksum (cp --checksum)${NC}"
     $BINARY cp "$TEST_DIR/file2.txt" "s3://$TEST_BUCKET/file2_checksum.txt" \
-        --checksum-mode ENABLED --checksum-algorithm SHA256
+        --checksum SHA256
     echo -e "${GREEN}✓ File uploaded with checksum validation${NC}"
 }
 

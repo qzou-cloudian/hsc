@@ -20,6 +20,9 @@ Thumbs.db
 /test-*
 *.tmp
 
+# Log files
+*.log
+
 # Backup files
 *.bak
 *.old

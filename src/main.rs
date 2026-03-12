@@ -1,6 +1,7 @@
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 mod commands;
+mod debug_interceptor;
 mod filters;
 mod path_utils;
 #[cfg(feature = "rdma")]
@@ -80,12 +81,9 @@ enum Commands {
         /// Exclude files matching pattern (can be specified multiple times)
         #[arg(long)]
         exclude: Vec<String>,
-        /// Checksum mode (ENABLED for single object operations)
-        #[arg(long)]
-        checksum_mode: Option<String>,
-        /// Checksum algorithm (CRC32, CRC32C, SHA1, SHA256)
-        #[arg(long)]
-        checksum_algorithm: Option<String>,
+        /// Checksum algorithm (ENABLED, CRC32, CRC32C, SHA1, SHA256); bare --checksum enables with default algorithm
+        #[arg(long, num_args = 0..=1, default_missing_value = "ENABLED")]
+        checksum: Option<String>,
     },
     /// Synchronize directories
     Sync {
@@ -137,12 +135,9 @@ enum Commands {
         /// Stat objects recursively
         #[arg(long)]
         recursive: bool,
-        /// Checksum mode (ENABLED for local files)
-        #[arg(long)]
-        checksum_mode: Option<String>,
-        /// Checksum algorithm (CRC32, CRC32C, SHA1, SHA256)
-        #[arg(long)]
-        checksum_algorithm: Option<String>,
+        /// Checksum algorithm (ENABLED, CRC32, CRC32C, SHA1, SHA256); bare --checksum enables with default algorithm
+        #[arg(long, num_args = 0..=1, default_missing_value = "ENABLED")]
+        checksum: Option<String>,
     },
     /// Compare directories or buckets and show differences
     Diff {
@@ -209,19 +204,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let matches = Cli::command().version(version).get_matches_from(args);
     let cli = Cli::from_arg_matches(&matches)?;
 
-    // Initialize tracing when --debug is set.  This enables aws_smithy_runtime's
-    // built-in trace instrumentation (request headers, response status, etc.).
-    // RUST_LOG can override the default filter.
-    if cli.debug {
-        use tracing_subscriber::EnvFilter;
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| EnvFilter::new("aws_smithy_runtime=trace")),
-            )
-            .with_writer(std::io::stderr)
-            .init();
-    }
+    // --debug flag or HSC_DEBUG env var enables the DebugInterceptor which
+    // prints request/response headers for every S3 call.
+    let debug = cli.debug
+        || std::env::var("HSC_DEBUG")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
 
     // Initialize S3 client with global options
     let mut client_config = s3_client::S3ClientConfig {
@@ -229,17 +217,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         region: cli.region,
         profile: cli.profile,
         verify_ssl: !cli.no_verify_ssl,
-        debug: cli.debug,
+        debug,
         multipart_threshold: 8388608, // Will be loaded from config
         multipart_chunksize: 8388608, // Will be loaded from config
         #[cfg(feature = "rdma")]
-        rdma_enabled: cli.rdma.is_some(),
+        rdma_provider: cli.rdma.clone(),
         #[cfg(not(feature = "rdma"))]
-        rdma_enabled: false,
-        #[cfg(feature = "rdma")]
-        rdma_mock: cli.rdma.as_deref() == Some("mock"),
-        #[cfg(not(feature = "rdma"))]
-        rdma_mock: false,
+        rdma_provider: None,
     };
 
     // Resolve RDMA settings from env/config before cloning so the provider
@@ -253,13 +237,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // performs getObject / putObject / uploadPart.
     #[cfg(feature = "rdma")]
     let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaProvider>> =
-        if client_config_clone.rdma_enabled {
-            Some(rdma::create_provider(
-                client_config_clone.rdma_mock,
-                client_config_clone.debug,
-            ))
-        } else {
-            None
+        match &client_config_clone.rdma_provider {
+            Some(p) => Some(rdma::create_provider(p, client_config_clone.debug)?),
+            None => None,
         };
 
     match cli.command {
@@ -274,8 +254,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             recursive,
             include,
             exclude,
-            checksum_mode,
-            checksum_algorithm,
+            checksum,
         } => {
             commands::cp::copy(
                 &client,
@@ -284,8 +263,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 recursive,
                 include,
                 exclude,
-                checksum_mode,
-                checksum_algorithm,
+                checksum,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
                 #[cfg(feature = "rdma")] rdma_provider,
@@ -339,10 +317,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Stat {
             path,
             recursive,
-            checksum_mode,
-            checksum_algorithm,
+            checksum,
         } => {
-            commands::stat::stat(&client, &path, recursive, checksum_mode, checksum_algorithm).await
+            commands::stat::stat(&client, &path, recursive, checksum).await
         }
         Commands::Diff {
             source,

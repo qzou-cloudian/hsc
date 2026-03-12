@@ -28,15 +28,15 @@ $HSTEST stat "$TEST_DIR/file1.txt"
 echo ""
 
 echo -e "${GREEN}Test 2: Stat with SHA256 checksum${NC}"
-$HSTEST stat "$TEST_DIR/file1.txt" --checksum-mode ENABLED --checksum-algorithm SHA256
+$HSTEST stat "$TEST_DIR/file1.txt" --checksum SHA256
 echo ""
 
 echo -e "${GREEN}Test 3: Stat with SHA1 checksum${NC}"
-$HSTEST stat "$TEST_DIR/file2.txt" --checksum-mode enabled --checksum-algorithm SHA1
+$HSTEST stat "$TEST_DIR/file2.txt" --checksum SHA1
 echo ""
 
 echo -e "${GREEN}Test 4: Stat with CRC32 checksum${NC}"
-$HSTEST stat "$TEST_DIR/file2.txt" --checksum-mode ENABLED --checksum-algorithm CRC32
+$HSTEST stat "$TEST_DIR/file2.txt" --checksum CRC32
 echo ""
 
 echo -e "${GREEN}Test 5: Stat on directory (non-recursive)${NC}"
@@ -48,7 +48,7 @@ $HSTEST stat "$TEST_DIR" --recursive
 echo ""
 
 echo -e "${GREEN}Test 7: Recursive stat with SHA1 checksums${NC}"
-$HSTEST stat "$TEST_DIR" --recursive --checksum-mode ENABLED --checksum-algorithm SHA1 | head -40
+$HSTEST stat "$TEST_DIR" --recursive --checksum SHA1 | head -40
 echo ""
 
 echo -e "${GREEN}Test 8: Stat on nested directory (recursive)${NC}"
@@ -71,7 +71,7 @@ echo ""
 # Verify SHA256 calculation
 echo -e "${GREEN}Test 10: Verify SHA256 checksum${NC}"
 EXPECTED_SHA256=$(sha256sum "$TEST_DIR/file1.txt" | awk '{print $1}')
-SHA256=$($HSTEST stat "$TEST_DIR/file1.txt" --checksum-mode ENABLED --checksum-algorithm SHA256 | grep "SHA256" | awk '{print $3}')
+SHA256=$($HSTEST stat "$TEST_DIR/file1.txt" --checksum SHA256 | grep "SHA256" | awk '{print $3}')
 echo "Expected SHA256: $EXPECTED_SHA256"
 echo "Calculated SHA256: $SHA256"
 if [ "$EXPECTED_SHA256" = "$SHA256" ]; then

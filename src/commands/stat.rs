@@ -14,8 +14,7 @@ pub async fn stat(
     client: &Client,
     path: &str,
     recursive: bool,
-    checksum_mode: Option<String>,
-    checksum_algorithm: Option<String>,
+    checksum: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path_type = parse_path(path)?;
 
@@ -40,10 +39,10 @@ pub async fn stat(
         PathType::Local(local_path) => {
             if recursive {
                 // Recursive local stat
-                stat_local_recursive(&local_path, checksum_mode, checksum_algorithm).await
+                stat_local_recursive(&local_path, checksum).await
             } else {
                 // Single local file/directory stat
-                stat_local(&local_path, checksum_mode, checksum_algorithm).await
+                stat_local(&local_path, checksum).await
             }
         }
     }
@@ -214,8 +213,7 @@ async fn stat_object(
 /// Display local filesystem information (S3-compatible format)
 async fn stat_local(
     path: &str,
-    checksum_mode: Option<String>,
-    checksum_algorithm: Option<String>,
+    checksum: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Normalize the path by stripping trailing slashes
     let normalized_path = path.trim_end_matches('/');
@@ -286,39 +284,34 @@ async fn stat_local(
         }
 
         // Calculate checksums if requested
-        let calc_checksums = checksum_mode.as_deref() == Some("ENABLED")
-            || checksum_mode.as_deref() == Some("enabled");
-
-        if calc_checksums {
-            if let Some(algo) = checksum_algorithm.as_deref() {
-                match algo.to_uppercase().as_str() {
-                    "CRC32" => {
-                        if let Ok(checksum) = calculate_file_crc32(path_obj).await {
-                            println!("CRC32     : {}", checksum);
-                        }
+        if checksum.is_some() {
+            match checksum.as_deref().map(|s| s.to_uppercase()).as_deref() {
+                Some("CRC32") => {
+                    if let Ok(result) = calculate_file_crc32(path_obj).await {
+                        println!("CRC32     : {}", result);
                     }
-                    "CRC32C" => {
-                        // CRC32C is similar to CRC32, using same implementation for demo
-                        if let Ok(checksum) = calculate_file_crc32(path_obj).await {
-                            println!("CRC32C    : {}", checksum);
-                        }
-                    }
-                    "SHA1" => {
-                        if let Ok(checksum) = calculate_file_sha1(path_obj).await {
-                            println!("SHA1      : {}", checksum);
-                        }
-                    }
-                    "SHA256" => {
-                        if let Ok(checksum) = calculate_file_sha256(path_obj).await {
-                            println!("SHA256    : {}", checksum);
-                        }
-                    }
-                    _ => {}
                 }
-            } else {
-                // Default to all checksums
-                if let Ok(checksum) = calculate_file_sha256(path_obj).await {
-                    println!("SHA256    : {}", checksum);
+                Some("CRC32C") => {
+                    // CRC32C is similar to CRC32, using same implementation for demo
+                    if let Ok(result) = calculate_file_crc32(path_obj).await {
+                        println!("CRC32C    : {}", result);
+                    }
+                }
+                Some("SHA1") => {
+                    if let Ok(result) = calculate_file_sha1(path_obj).await {
+                        println!("SHA1      : {}", result);
+                    }
+                }
+                Some("SHA256") => {
+                    if let Ok(result) = calculate_file_sha256(path_obj).await {
+                        println!("SHA256    : {}", result);
+                    }
+                }
+                _ => {
+                    // Default (bare --checksum / ENABLED): compute SHA256
+                    if let Ok(result) = calculate_file_sha256(path_obj).await {
+                        println!("SHA256    : {}", result);
+                    }
                 }
             }
         }
@@ -419,8 +412,7 @@ async fn calculate_file_sha256(path: &Path) -> Result<String, Box<dyn std::error
 /// Stat local files recursively
 async fn stat_local_recursive(
     path: &str,
-    checksum_mode: Option<String>,
-    checksum_algorithm: Option<String>,
+    checksum: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path_obj = Path::new(path);
 
@@ -430,7 +422,7 @@ async fn stat_local_recursive(
 
     if !path_obj.is_dir() {
         // Single file
-        return stat_local(path, checksum_mode, checksum_algorithm).await;
+        return stat_local(path, checksum).await;
     }
 
     // Walk directory recursively
@@ -440,8 +432,7 @@ async fn stat_local_recursive(
         if entry_path.is_file() {
             stat_local(
                 entry_path.to_str().unwrap(),
-                checksum_mode.clone(),
-                checksum_algorithm.clone(),
+                checksum.clone(),
             )
             .await?;
             println!(); // Blank line between entries

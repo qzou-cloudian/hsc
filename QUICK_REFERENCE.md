@@ -105,7 +105,7 @@ hsc sync --exclude "*.tmp" --exclude ".git/*" \
 ### Verify file integrity
 ```bash
 hsc cp large.zip s3://bucket/ \
-  --checksum-algorithm SHA256
+  --checksum SHA256
 ```
 
 ### Compare by content
@@ -124,14 +124,14 @@ hsc cat s3://logs/app.log \
 ### Recursive stat with checksums
 ```bash
 hsc stat ./dir --recursive \
-  --checksum-mode ENABLED --checksum-algorithm SHA256
+  --checksum SHA256
 ```
 
 ## Tips
 
 - **Sync vs Copy**: Use `sync` for incremental backups (faster for large directories)
 - **Multipart**: Automatically used for files >= 8MB (configurable)
-- **Checksums**: Add `--checksum-algorithm` for data integrity verification
+- **Checksums**: Add `--checksum` for data integrity verification (e.g., `--checksum SHA256`)
 - **Ranges**: Use `cat --range` to inspect large files without downloading entirely
 - **Filters**: Combine `--include` and `--exclude` for fine-grained control
 - **Endpoints**: Set `AWS_ENDPOINT_URL` for MinIO, Cloudian, or other S3-compatible services

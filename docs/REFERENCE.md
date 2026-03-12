@@ -83,8 +83,7 @@ hsc cp <source> <dest> [options]
 - `--recursive` - Copy directories recursively
 - `--include <pattern>` - Include only files matching pattern (can be repeated)
 - `--exclude <pattern>` - Exclude files matching pattern (can be repeated)
-- `--checksum-mode <mode>` - ENABLED or DISABLED (for single file)
-- `--checksum-algorithm <alg>` - CRC32, CRC32C, SHA1, or SHA256
+- `--checksum [<alg>]` - Enable checksum for single file operations; optionally specify algorithm (CRC32, CRC32C, SHA1, SHA256); bare `--checksum` defaults to CRC32
 
 **Examples:**
 ```bash
@@ -92,7 +91,7 @@ hsc cp file.txt s3://bucket/                    # Upload file
 hsc cp s3://bucket/file.txt ./                  # Download file
 hsc cp --recursive ./dir s3://bucket/prefix/    # Upload directory
 hsc cp --include "*.jpg" ./photos s3://bucket/  # Upload only .jpg files
-hsc cp file.txt s3://bucket/ --checksum-algorithm SHA256
+hsc cp file.txt s3://bucket/ --checksum SHA256
 ```
 
 ### mv - Move
@@ -168,8 +167,7 @@ hsc stat <path> [options]
 
 **Options:**
 - `--recursive` - Process directories/prefixes recursively
-- `--checksum-mode <mode>` - ENABLED or DISABLED (for local files)
-- `--checksum-algorithm <alg>` - CRC32, CRC32C, SHA1, or SHA256 (for local files)
+- `--checksum [<alg>]` - Compute checksum for local files; optionally specify algorithm (CRC32, CRC32C, SHA1, SHA256); bare `--checksum` defaults to SHA256
 
 **Local File Output:**
 - Name, Type, Size
@@ -194,7 +192,7 @@ hsc stat <path> [options]
 ```bash
 hsc stat file.txt                                     # Local file info
 hsc stat ./dir --recursive                            # All files in directory
-hsc stat file.txt --checksum-mode ENABLED --checksum-algorithm SHA256
+hsc stat file.txt --checksum SHA256
 hsc stat s3://bucket/object.txt                       # S3 object info
 hsc stat s3://bucket                                  # Bucket info
 hsc stat s3://bucket/prefix/ --recursive              # All objects with prefix
