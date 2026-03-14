@@ -396,8 +396,10 @@ async fn upload_file_multipart(
             }
         }
         #[cfg(not(feature = "rdma"))]
+        let mut buffer = Vec::new();
+        #[cfg(not(feature = "rdma"))]
         {
-            let mut buffer = vec![0u8; chunk_size as usize];
+            buffer = vec![0u8; chunk_size as usize];
             let mut n_read = 0usize;
             while n_read < chunk_size as usize {
                 let n = file.read(&mut buffer[n_read..]).await?;
