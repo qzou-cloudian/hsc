@@ -226,18 +226,32 @@ for size in "${SIZES[@]}"; do
         response_etag=$(echo "$stat_output" | grep "^ETag" | sed 's/ETag *: //' | tr -d '"')
         response_content_length=$(echo "$stat_output" | grep "^Size" | sed 's/Size *: //; s/ bytes.*//')
 
-        # Check ETag header
+        # Check ETag header — S3 Express One Zone uses random/opaque ETags by design;
+        # any non-empty ETag is valid (multipart ETags contain "-").
         if [ -n "$response_etag" ]; then
-            original_md5=$(md5sum "$original_file" | cut -d' ' -f1)
-            if [ "$response_etag" = "$original_md5" ]; then
-                success "Response ETag matches MD5: $response_etag"
-            elif [[ "$response_etag" == *"-"* ]]; then
+            if [[ "$response_etag" == *"-"* ]]; then
                 success "Response ETag (multipart): $response_etag"
             else
-                error "Response ETag mismatch (expected: $original_md5, got: $response_etag)"
+                success "Response ETag present: $response_etag"
             fi
         else
             error "Response ETag not found for $object_key"
+        fi
+
+        # Verify data integrity via SHA-256 checksum (x-amz-checksum-sha256).
+        # Use 'hsc stat' (which sends checksum-mode: ENABLED) to retrieve the
+        # server-stored checksum with proper SigV4 credentials.
+        response_checksum=$($BINARY stat "s3://$BUCKET_NAME/$object_key" 2>/dev/null \
+            | grep "^SHA256" | awk '{print $3}')
+        if [ -n "$response_checksum" ]; then
+            expected_checksum=$(openssl dgst -sha256 -binary "$original_file" | base64)
+            if [ "$response_checksum" = "$expected_checksum" ]; then
+                success "SHA-256 checksum verified: $response_checksum"
+            else
+                error "SHA-256 checksum mismatch (expected: $expected_checksum, got: $response_checksum)"
+            fi
+        else
+            error "SHA-256 checksum (x-amz-checksum-sha256) not found for $object_key"
         fi
 
         # Check Content-Length header

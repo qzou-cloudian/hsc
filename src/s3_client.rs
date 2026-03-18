@@ -1,8 +1,28 @@
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client;
 use std::env;
+use std::sync::Arc;
 
 use crate::debug_interceptor::DebugInterceptor;
+
+/// A `rustls` `ServerCertVerifier` that accepts any certificate.
+/// Used only when `--no-verify-ssl` is requested (e.g. self-signed cert testing).
+#[derive(Debug)]
+struct AcceptAnyServerCert;
+
+impl rustls::client::ServerCertVerifier for AcceptAnyServerCert {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::ServerCertVerified::assertion())
+    }
+}
 
 /// Configuration for S3 client creation
 #[derive(Clone)]
@@ -116,11 +136,25 @@ pub async fn create_s3_client(
             .force_path_style(true); // Required for S3-compatible services
     }
 
-    // Disable SSL verification if requested.
-    // NOTE: The AWS Rust SDK requires a custom HTTP client (e.g. via hyper + rustls)
-    // to skip TLS verification.  Until that is wired up, this flag has no effect.
+    // Disable SSL verification if requested (e.g. self-signed cert testing).
     if !config.verify_ssl {
-        eprintln!("Warning: --no-verify-ssl is not yet implemented; SSL verification remains enabled");
+        let tls_cfg = std::sync::Arc::new(
+            rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
+                .with_no_client_auth(),
+        );
+        let https: hyper_rustls::HttpsConnector<hyper::client::HttpConnector> =
+            hyper_rustls::HttpsConnectorBuilder::new()
+                .with_tls_config((*tls_cfg).clone())
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .build();
+        let smithy_client =
+            aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder::new()
+                .build(https);
+        s3_config_builder = s3_config_builder.http_client(smithy_client);
     }
 
     // Attach DebugInterceptor when debug mode is enabled.

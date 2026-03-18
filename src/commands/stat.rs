@@ -134,7 +134,13 @@ async fn stat_object(
     bucket: &str,
     key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let response = client.head_object().bucket(bucket).key(key).send().await?;
+    let response = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+        .send()
+        .await?;
 
     println!("Name      : s3://{}/{}", bucket, key);
     println!("Type      : file");

@@ -18,6 +18,7 @@ cuobj = ["rdma", "s3-rdma/cuobj"]
 [dependencies]
 aws-config = "1.8.14"
 aws-sdk-s3 = "1.124.0"
+aws-smithy-runtime = { version = "1", features = ["client", "connector-hyper-0-14-x"] }
 aws-smithy-runtime-api = "1.11"
 aws-smithy-types = "1.2"
 base64 = "0.22"
@@ -27,6 +28,9 @@ crc32fast = "1.5.0"
 crc32c = "0.6.8"
 futures-util = "0.3.32"
 glob = "0.3.3"
+hyper = { version = "0.14", features = ["full"] }
+hyper-rustls = { version = "0.24", features = ["rustls-native-certs", "http2"] }
+rustls = { version = "0.21", features = ["dangerous_configuration"] }
 s3-rdma = { path = "../s3-rdma/core", optional = true }
 md-5 = "0.10.6"
 sha-1 = "0.10.1"
