@@ -111,7 +111,7 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8MB)
 --profile <name>        # AWS profile to use
 --region <region>       # AWS region
 --endpoint-url <url>    # Custom S3 endpoint
---no-verify-ssl         # Disable SSL verification (not yet implemented)
+--no-verify-ssl         # Disable SSL verification
 --debug                 # Enable debug output
 --rdma [PROVIDER]       # Enable RDMA transfers (requires rdma feature build)
 --version               # Show version
