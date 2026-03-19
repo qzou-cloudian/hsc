@@ -1,50 +1,33 @@
 #!/bin/bash
-# Build hsc RPM package inside a Rocky Linux 8 container.
-# Expected mounts:
-#   /build/hsc         — hsc source tree (read-only)
-#   /cargo/target      — Cargo target directory (persistent Docker volume)
-#   /out               — output directory for the .rpm file
+# Package pre-built hsc artifacts as an RPM for Rocky Linux 8.
+#
+# Expected bind-mounts:
+#   /pkg  — dist/rocky-8/ directory containing hsc (and optionally libs3_rdma_cuobj.so)
+#
+# Required environment:
+#   VERSION — package version string (e.g. "0.2.0")
 set -e
 
-cd /build/hsc
+VERSION=${VERSION:?VERSION env var must be set}
+BINARY=/pkg/hsc
+SO=/pkg/libs3_rdma_cuobj.so
 
-VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*= *"//;s/"//')
-echo "==> Building hsc v${VERSION} RPM for Rocky Linux 8"
+echo "==> Packaging hsc v${VERSION} as RPM (Rocky Linux 8)"
 
-# Copy source to a writable working directory so Cargo can update Cargo.lock.
-cp -rp /build/hsc /tmp/hsc-src
+[ -f "$BINARY" ] || { echo "ERROR: $BINARY not found — run 'make rocky' first."; exit 1; }
 
-# Create a stub s3-rdma crate at the path Cargo.toml expects (../s3-rdma/core).
-# The real crate is optional (rdma/cuobj features) so a stub that declares the
-# required feature names is enough for dependency resolution to succeed.
-mkdir -p /tmp/s3-rdma/core/src
-cat > /tmp/s3-rdma/core/Cargo.toml << 'STUB'
-[package]
-name = "s3-rdma"
-version = "0.1.0"
-edition = "2021"
-
-[features]
-cuobj = []
-STUB
-printf '' > /tmp/s3-rdma/core/src/lib.rs
-
-# Build the release binary from the writable copy
-echo "==> Compiling (FEATURES=${FEATURES:-<none>})..."
-cd /tmp/hsc-src
-cargo build --release \
-    ${FEATURES:+--features "$FEATURES"} \
-    --target-dir /cargo/target
-
-BINARY=/cargo/target/release/hsc
-
-# Strip debug symbols to reduce package size
-strip "$BINARY"
-
-# Stage the binary where rpmbuild can find it
+# Stage binaries for rpmbuild
 cp "$BINARY" ~/rpmbuild/SOURCES/hsc
 
-# Generate the spec file
+SO_INSTALL=""
+SO_FILES=""
+if [ -f "$SO" ]; then
+    cp "$SO" ~/rpmbuild/SOURCES/libs3_rdma_cuobj.so
+    SO_INSTALL="install -Dm755 %{_sourcedir}/libs3_rdma_cuobj.so %{buildroot}%{_libdir}/libs3_rdma_cuobj.so"
+    SO_FILES="%{_libdir}/libs3_rdma_cuobj.so"
+    echo "==> Including libs3_rdma_cuobj.so"
+fi
+
 cat > ~/rpmbuild/SPECS/hsc.spec << EOF
 Name:       hsc
 Version:    ${VERSION}
@@ -60,16 +43,15 @@ Supports AWS S3 and S3-compatible storage services (MinIO, Cloudian, etc.)
 with multipart upload, checksum validation, range reads, and recursive sync.
 
 %prep
-# Binary pre-built by Cargo — nothing to prepare.
-
 %build
-# Binary pre-built by Cargo — nothing to build.
 
 %install
 install -Dm755 %{_sourcedir}/hsc %{buildroot}%{_bindir}/hsc
+${SO_INSTALL}
 
 %files
 %{_bindir}/hsc
+${SO_FILES}
 
 %changelog
 * $(LC_TIME=C date '+%a %b %d %Y') Qingshan <qzou@cloudian.com> - ${VERSION}-1
@@ -80,5 +62,5 @@ echo "==> Running rpmbuild..."
 rpmbuild -bb ~/rpmbuild/SPECS/hsc.spec
 
 RPM=$(find ~/rpmbuild/RPMS/ -name "hsc-*.rpm" | head -1)
-cp "$RPM" /out/
-echo "==> Package ready: /out/$(basename "$RPM")"
+cp "$RPM" /pkg/
+echo "==> Package ready: /pkg/$(basename "$RPM")"

@@ -1,9 +1,12 @@
 FROM rockylinux:8
 
-RUN dnf install -y gcc gcc-c++ make curl ca-certificates git && \
+RUN dnf install -y gcc gcc-c++ make curl ca-certificates git rpm-build rpmdevtools && \
     dnf clean all
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain stable --profile minimal
 
 ENV PATH="/root/.cargo/bin:$PATH"
+
+# Pre-create the RPM build tree so packaging works without extra setup
+RUN rpmdev-setuptree
