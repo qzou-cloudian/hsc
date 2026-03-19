@@ -1,10 +1,13 @@
 use crate::path_utils::{parse_s3_uri, PathType};
+use aws_sdk_s3::operation::create_bucket::CreateBucketError;
 use aws_sdk_s3::Client;
+use aws_smithy_runtime_api::client::result::SdkError;
 
 /// Create an S3 bucket
 pub async fn make_bucket(
     client: &Client,
     bucket_uri: &str,
+    ignore_existing: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = parse_s3_uri(bucket_uri)?;
 
@@ -26,8 +29,22 @@ pub async fn make_bucket(
 
     println!("Creating bucket: {}", bucket_name);
 
-    client.create_bucket().bucket(&bucket_name).send().await?;
+    let result = client.create_bucket().bucket(&bucket_name).send().await;
 
+    if let Err(SdkError::ServiceError(ref e)) = result {
+        if ignore_existing {
+            match e.err() {
+                CreateBucketError::BucketAlreadyExists(_)
+                | CreateBucketError::BucketAlreadyOwnedByYou(_) => {
+                    println!("Bucket already exists (ignored): {}", bucket_name);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    result?;
     println!("Successfully created bucket: {}", bucket_name);
     Ok(())
 }

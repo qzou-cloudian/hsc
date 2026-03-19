@@ -10,6 +10,7 @@ cargo install hsc
 ### Bucket Operations
 ```bash
 hsc mb s3://bucket                    # Create bucket
+hsc mb s3://bucket --ignore-existing  # Create bucket (no error if exists)
 hsc rb s3://bucket --force            # Delete bucket + contents
 hsc ls                                # List all buckets
 hsc ls s3://bucket/                   # List objects in bucket
@@ -64,6 +65,10 @@ hsc rm s3://bucket/logs/ -r           # Delete all with prefix
 --endpoint-url https://s3.example.com    # Use S3-compatible service
 --debug                                  # Enable debug output
 --no-verify-ssl                          # Disable SSL verification
+--cli-connect-timeout 10                 # TCP connect timeout in seconds
+--cli-read-timeout 60                    # Socket read timeout in seconds
+-H "x-custom:value"                      # Custom HTTP header (repeatable)
+--no-sign-request                        # Unsigned requests (public buckets)
 ```
 
 ## Configuration

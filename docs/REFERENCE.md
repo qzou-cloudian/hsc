@@ -7,14 +7,19 @@ Quick reference for all hsc commands with detailed options.
 Available for all commands:
 
 ```
---profile <name>        AWS profile to use
---region <region>       AWS region override
---endpoint-url <url>    Custom S3 endpoint (for S3-compatible services)
---no-verify-ssl         Disable SSL certificate verification
---debug                 Enable debug logging
---rdma [PROVIDER]       Enable RDMA transfers (requires rdma feature build).
-                        PROVIDER: auto (default), cuobj, mock
---version               Show version information
+--profile <name>             AWS profile to use
+--region <region>            AWS region override
+--endpoint-url <url>         Custom S3 endpoint (for S3-compatible services)
+--no-verify-ssl              Disable SSL certificate verification
+--debug                      Enable debug logging
+--cli-connect-timeout <secs> TCP connect timeout in seconds (0 = no timeout)
+--cli-read-timeout <secs>    Socket read timeout in seconds (0 = no timeout)
+-H, --custom-header <KEY:VALUE>
+                             Add a custom HTTP header to every request (repeatable)
+--no-sign-request            Send requests without AWS signatures (for public buckets)
+--rdma [PROVIDER]            Enable RDMA transfers (requires rdma feature build).
+                             PROVIDER: auto (default), cuobj, mock
+--version                    Show version information
 ```
 
 ## Commands
@@ -24,15 +29,17 @@ Available for all commands:
 Create a new S3 bucket.
 
 ```bash
-hsc mb s3://bucket-name
+hsc mb s3://bucket-name [--ignore-existing]
 ```
 
-**Options:** None
+**Options:**
+- `--ignore-existing` - Do not fail if the bucket already exists
 
 **Examples:**
 ```bash
 hsc mb s3://my-new-bucket
 hsc --region eu-west-1 mb s3://eu-bucket
+hsc mb s3://my-bucket --ignore-existing   # Idempotent create
 ```
 
 ### rb - Remove Bucket

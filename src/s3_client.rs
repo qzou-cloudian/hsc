@@ -1,7 +1,15 @@
 use aws_config::BehaviorVersion;
+use aws_credential_types::Credentials;
 use aws_sdk_s3::Client;
+use aws_smithy_runtime_api::box_error::BoxError;
+use aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterceptorContextMut;
+use aws_smithy_runtime_api::client::interceptors::Intercept;
+use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
+use aws_smithy_types::config_bag::ConfigBag;
+use aws_smithy_types::timeout::TimeoutConfig;
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::debug_interceptor::DebugInterceptor;
 
@@ -24,6 +32,55 @@ impl rustls::client::ServerCertVerifier for AcceptAnyServerCert {
     }
 }
 
+/// Interceptor that removes AWS auth headers so requests are sent unsigned.
+/// Used when `--no-sign-request` is set (e.g. accessing public buckets).
+#[derive(Debug)]
+struct NoSignRequestInterceptor;
+
+impl Intercept for NoSignRequestInterceptor {
+    fn name(&self) -> &'static str {
+        "NoSignRequestInterceptor"
+    }
+
+    fn modify_before_transmit(
+        &self,
+        context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _runtime_components: &RuntimeComponents,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        let req = context.request_mut();
+        req.headers_mut().remove("authorization");
+        req.headers_mut().remove("x-amz-security-token");
+        Ok(())
+    }
+}
+
+/// Interceptor that injects user-supplied headers into every outgoing request.
+/// Used when `--custom-header KEY:VALUE` is specified.
+#[derive(Debug)]
+struct CustomHeadersInterceptor {
+    headers: Vec<(String, String)>,
+}
+
+impl Intercept for CustomHeadersInterceptor {
+    fn name(&self) -> &'static str {
+        "CustomHeadersInterceptor"
+    }
+
+    fn modify_before_transmit(
+        &self,
+        context: &mut BeforeTransmitInterceptorContextMut<'_>,
+        _runtime_components: &RuntimeComponents,
+        _cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        let req = context.request_mut();
+        for (key, value) in &self.headers {
+            req.headers_mut().append(key.clone(), value.clone());
+        }
+        Ok(())
+    }
+}
+
 /// Configuration for S3 client creation
 #[derive(Clone)]
 pub struct S3ClientConfig {
@@ -34,6 +91,14 @@ pub struct S3ClientConfig {
     pub debug: bool,
     pub multipart_threshold: u64,
     pub multipart_chunksize: u64,
+    /// Read timeout in seconds; `None` or `0` means no timeout.
+    pub read_timeout_secs: Option<u64>,
+    /// Connect timeout in seconds; `None` or `0` means no timeout.
+    pub connect_timeout_secs: Option<u64>,
+    /// Extra headers to inject into every request (parsed KEY:VALUE pairs).
+    pub custom_headers: Vec<String>,
+    /// When `true`, auth headers are stripped so requests are sent unsigned.
+    pub no_sign_request: bool,
     /// Normalized RDMA provider name (`"mock"`, `"cuobj"`), or `None` to disable RDMA.
     #[allow(dead_code)]
     pub rdma_provider: Option<String>,
@@ -49,6 +114,10 @@ impl Default for S3ClientConfig {
             debug: false,
             multipart_threshold: 8388608, // 8MB default
             multipart_chunksize: 8388608, // 8MB default
+            read_timeout_secs: None,
+            connect_timeout_secs: None,
+            custom_headers: Vec::new(),
+            no_sign_request: false,
             rdma_provider: None,
         }
     }
@@ -117,6 +186,31 @@ pub async fn create_s3_client(
     }
     loader = loader.region(aws_sdk_s3::config::Region::new(region));
 
+    // Apply connect/read timeout configuration
+    {
+        let mut tb = TimeoutConfig::builder();
+        if let Some(t) = config.connect_timeout_secs {
+            if t > 0 {
+                tb = tb.connect_timeout(Duration::from_secs(t));
+            }
+        }
+        if let Some(t) = config.read_timeout_secs {
+            if t > 0 {
+                tb = tb.read_timeout(Duration::from_secs(t));
+            }
+        }
+        loader = loader.timeout_config(tb.build());
+    }
+
+    // Provide empty credentials when --no-sign-request is set so the SDK does
+    // not fail trying to resolve real credentials before the interceptor strips
+    // the auth headers.
+    if config.no_sign_request {
+        loader = loader.credentials_provider(
+            Credentials::new("", "", None::<String>, None, "anonymous"),
+        );
+    }
+
     // Load the AWS config (respects AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE)
     let aws_config = loader.load().await;
 
@@ -160,6 +254,28 @@ pub async fn create_s3_client(
     // Attach DebugInterceptor when debug mode is enabled.
     if config.debug {
         s3_config_builder = s3_config_builder.interceptor(DebugInterceptor::default());
+    }
+
+    // Add custom headers interceptor if any --custom-header flags were given.
+    if !config.custom_headers.is_empty() {
+        let mut parsed: Vec<(String, String)> = Vec::new();
+        for h in &config.custom_headers {
+            let parts: Vec<&str> = h.splitn(2, ':').collect();
+            if parts.len() == 2 {
+                parsed.push((parts[0].trim().to_string(), parts[1].trim().to_string()));
+            } else {
+                eprintln!("Warning: ignoring malformed --custom-header (expected KEY:VALUE): {}", h);
+            }
+        }
+        if !parsed.is_empty() {
+            s3_config_builder =
+                s3_config_builder.interceptor(CustomHeadersInterceptor { headers: parsed });
+        }
+    }
+
+    // Strip auth headers when --no-sign-request is set.
+    if config.no_sign_request {
+        s3_config_builder = s3_config_builder.interceptor(NoSignRequestInterceptor);
     }
 
     let s3_config = s3_config_builder.build();

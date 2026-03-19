@@ -58,7 +58,7 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 
 ### Bucket Operations
 
-- **`mb s3://bucket`** - Create a new bucket
+- **`mb s3://bucket [--ignore-existing]`** - Create a new bucket
 - **`rb s3://bucket [--force]`** - Remove bucket (use --force to delete all objects)
 - **`ls [s3://bucket[/prefix]] [--recursive]`** - List buckets or objects
 
@@ -108,13 +108,17 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8MB)
 ### Global Options
 
 ```bash
---profile <name>        # AWS profile to use
---region <region>       # AWS region
---endpoint-url <url>    # Custom S3 endpoint
---no-verify-ssl         # Disable SSL verification
---debug                 # Enable debug output
---rdma [PROVIDER]       # Enable RDMA transfers (requires rdma feature build)
---version               # Show version
+--profile <name>                 # AWS profile to use
+--region <region>                # AWS region
+--endpoint-url <url>             # Custom S3 endpoint
+--no-verify-ssl                  # Disable SSL verification
+--debug                          # Enable debug output
+--cli-connect-timeout <secs>     # TCP connect timeout (0 = no timeout)
+--cli-read-timeout <secs>        # Socket read timeout (0 = no timeout)
+-H, --custom-header <KEY:VALUE>  # Add a custom HTTP header to every request (repeatable)
+--no-sign-request                # Send unsigned requests (for public buckets)
+--rdma [PROVIDER]                # Enable RDMA transfers (requires rdma feature build)
+--version                        # Show version
 ```
 
 ### Environment Variables
@@ -245,6 +249,31 @@ hsc ls
 
 # Or use command-line option
 hsc --endpoint-url https://s3.example.com ls
+```
+
+### Public Buckets (No Signing)
+
+Access publicly readable buckets without AWS credentials:
+
+```bash
+hsc --no-sign-request ls s3://my-public-bucket
+hsc --no-sign-request cp s3://my-public-bucket/file.txt ./
+```
+
+### Custom Headers
+
+Inject arbitrary HTTP headers into every request (useful for proxies or custom auth):
+
+```bash
+hsc -H "x-forwarded-for:10.0.0.1" ls
+hsc -H "x-request-id:abc123" -H "x-tenant:acme" cp file.txt s3://bucket/
+```
+
+### Timeouts
+
+```bash
+# 5-second connect timeout, 30-second read timeout
+hsc --cli-connect-timeout 5 --cli-read-timeout 30 cp large.bin s3://bucket/
 ```
 
 ## Examples

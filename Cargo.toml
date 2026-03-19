@@ -17,6 +17,7 @@ cuobj = ["rdma", "s3-rdma/cuobj"]
 
 [dependencies]
 aws-config = "1.8.14"
+aws-credential-types = "1"
 aws-sdk-s3 = "1.124.0"
 aws-smithy-runtime = { version = "1", features = ["client", "connector-hyper-0-14-x"] }
 aws-smithy-runtime-api = "1.11"

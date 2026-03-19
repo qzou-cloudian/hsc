@@ -39,6 +39,22 @@ struct Cli {
     #[arg(long, global = true)]
     region: Option<String>,
 
+    /// Maximum time in seconds allowed for socket read operations (0 = no timeout)
+    #[arg(long, global = true, value_name = "SECONDS")]
+    cli_read_timeout: Option<u64>,
+
+    /// Maximum time in seconds allowed for socket connection (0 = no timeout)
+    #[arg(long, global = true, value_name = "SECONDS")]
+    cli_connect_timeout: Option<u64>,
+
+    /// Add a custom HTTP header to every request in KEY:VALUE format (can be specified multiple times)
+    #[arg(short = 'H', long, global = true, value_name = "KEY:VALUE")]
+    custom_header: Vec<String>,
+
+    /// Disable AWS request signing (for public buckets or anonymous access)
+    #[arg(long, global = true)]
+    no_sign_request: bool,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -49,6 +65,9 @@ enum Commands {
     Mb {
         /// S3 URI (s3://bucket-name)
         bucket: String,
+        /// Do not fail if the bucket already exists
+        #[arg(long)]
+        ignore_existing: bool,
     },
     /// Remove an S3 bucket
     Rb {
@@ -220,6 +239,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         debug,
         multipart_threshold: 8388608, // Will be loaded from config
         multipart_chunksize: 8388608, // Will be loaded from config
+        read_timeout_secs: cli.cli_read_timeout,
+        connect_timeout_secs: cli.cli_connect_timeout,
+        custom_headers: cli.custom_header,
+        no_sign_request: cli.no_sign_request,
         #[cfg(feature = "rdma")]
         rdma_provider: cli.rdma.clone(),
         #[cfg(not(feature = "rdma"))]
@@ -243,7 +266,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
     match cli.command {
-        Commands::Mb { bucket } => commands::mb::make_bucket(&client, &bucket).await,
+        Commands::Mb { bucket, ignore_existing } => commands::mb::make_bucket(&client, &bucket, ignore_existing).await,
         Commands::Rb { bucket, force } => {
             commands::rb::remove_bucket(&client, &bucket, force).await
         }
