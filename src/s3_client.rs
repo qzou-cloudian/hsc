@@ -178,7 +178,8 @@ pub async fn create_s3_client(
     loader = loader.profile_name(&profile);
 
     // Set region (CLI option > environment > config file > default)
-    let region = config.region
+    let region = config
+        .region
         .or_else(|| env::var("AWS_REGION").ok())
         .unwrap_or_else(|| "us-east-1".to_string());
     if config.debug {
@@ -206,9 +207,13 @@ pub async fn create_s3_client(
     // not fail trying to resolve real credentials before the interceptor strips
     // the auth headers.
     if config.no_sign_request {
-        loader = loader.credentials_provider(
-            Credentials::new("", "", None::<String>, None, "anonymous"),
-        );
+        loader = loader.credentials_provider(Credentials::new(
+            "",
+            "",
+            None::<String>,
+            None,
+            "anonymous",
+        ));
     }
 
     // Load the AWS config (respects AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE)
@@ -246,8 +251,7 @@ pub async fn create_s3_client(
                 .enable_http2()
                 .build();
         let smithy_client =
-            aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder::new()
-                .build(https);
+            aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder::new().build(https);
         s3_config_builder = s3_config_builder.http_client(smithy_client);
     }
 
@@ -264,7 +268,10 @@ pub async fn create_s3_client(
             if parts.len() == 2 {
                 parsed.push((parts[0].trim().to_string(), parts[1].trim().to_string()));
             } else {
-                eprintln!("Warning: ignoring malformed --custom-header (expected KEY:VALUE): {}", h);
+                eprintln!(
+                    "Warning: ignoring malformed --custom-header (expected KEY:VALUE): {}",
+                    h
+                );
             }
         }
         if !parsed.is_empty() {
@@ -338,7 +345,10 @@ fn load_multipart_settings(profile: &str) -> Result<(u64, u64), Box<dyn std::err
 pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
     if config.rdma_provider.is_some() {
         // Normalize the CLI-provided value (e.g. "auto" → "cuobj").
-        config.rdma_provider = config.rdma_provider.as_deref().and_then(parse_rdma_provider_value);
+        config.rdma_provider = config
+            .rdma_provider
+            .as_deref()
+            .and_then(parse_rdma_provider_value);
         return;
     }
     let profile = config

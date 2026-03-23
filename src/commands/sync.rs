@@ -37,7 +37,8 @@ pub async fn sync(
                 &filter,
                 multipart_threshold,
                 multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }
@@ -48,7 +49,8 @@ pub async fn sync(
                 key,
                 dst,
                 &filter,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }
@@ -124,7 +126,8 @@ async fn sync_local_to_s3(
                     None,
                     multipart_threshold,
                     multipart_chunksize,
-                    #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+                    #[cfg(feature = "rdma")]
+                    rdma.as_ref().map(Arc::clone),
                 )
                 .await?;
                 synced_count += 1;
@@ -198,7 +201,8 @@ async fn sync_s3_to_local(
                         key,
                         local_path.to_str().unwrap(),
                         None,
-                        #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+                        #[cfg(feature = "rdma")]
+                        rdma.as_ref().map(Arc::clone),
                     )
                     .await?;
                     synced_count += 1;

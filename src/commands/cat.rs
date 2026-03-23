@@ -40,7 +40,8 @@ pub async fn cat(
                 range,
                 offset,
                 size,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }

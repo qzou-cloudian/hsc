@@ -213,9 +213,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let base = env!("CARGO_PKG_VERSION");
         let s = {
             #[cfg(feature = "rdma")]
-            { format!("{base}\n{}", rdma::rdma_provider_info()) }
+            {
+                format!("{base}\n{}", rdma::rdma_provider_info())
+            }
             #[cfg(not(feature = "rdma"))]
-            { format!("{base}\nRDMA providers: none (not built)") }
+            {
+                format!("{base}\nRDMA providers: none (not built)")
+            }
         };
         Box::leak(s.into_boxed_str())
     };
@@ -266,7 +270,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
     match cli.command {
-        Commands::Mb { bucket, ignore_existing } => commands::mb::make_bucket(&client, &bucket, ignore_existing).await,
+        Commands::Mb {
+            bucket,
+            ignore_existing,
+        } => commands::mb::make_bucket(&client, &bucket, ignore_existing).await,
         Commands::Rb { bucket, force } => {
             commands::rb::remove_bucket(&client, &bucket, force).await
         }
@@ -289,7 +296,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 checksum,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma_provider,
+                #[cfg(feature = "rdma")]
+                rdma_provider,
             )
             .await
         }
@@ -307,7 +315,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 exclude,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma_provider,
+                #[cfg(feature = "rdma")]
+                rdma_provider,
             )
             .await
         }
@@ -327,7 +336,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 exclude,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma_provider,
+                #[cfg(feature = "rdma")]
+                rdma_provider,
             )
             .await
         }
@@ -341,9 +351,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             recursive,
             checksum,
-        } => {
-            commands::stat::stat(&client, &path, recursive, checksum).await
-        }
+        } => commands::stat::stat(&client, &path, recursive, checksum).await,
         Commands::Diff {
             source,
             dest,
@@ -356,30 +364,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             range,
             offset,
             size,
-        } => commands::cat::cat(
-            &client,
-            &path,
-            range,
-            offset,
-            size,
-            #[cfg(feature = "rdma")] rdma_provider,
-        )
-        .await,
+        } => {
+            commands::cat::cat(
+                &client,
+                &path,
+                range,
+                offset,
+                size,
+                #[cfg(feature = "rdma")]
+                rdma_provider,
+            )
+            .await
+        }
         Commands::Cmp {
             path1,
             path2,
             range,
             offset,
             size,
-        } => commands::cmp::cmp(
-            &client,
-            &path1,
-            &path2,
-            range,
-            offset,
-            size,
-            #[cfg(feature = "rdma")] rdma_provider,
-        )
-        .await,
+        } => {
+            commands::cmp::cmp(
+                &client,
+                &path1,
+                &path2,
+                range,
+                offset,
+                size,
+                #[cfg(feature = "rdma")]
+                rdma_provider,
+            )
+            .await
+        }
     }
 }

@@ -96,7 +96,15 @@ impl RdmaInterceptor {
         checksum_algorithm: Option<String>,
         checksum_value: Option<String>,
     ) -> Self {
-        Self { provider, token, size, rdma_confirmed, debug, checksum_algorithm, checksum_value }
+        Self {
+            provider,
+            token,
+            size,
+            rdma_confirmed,
+            debug,
+            checksum_algorithm,
+            checksum_value,
+        }
     }
 
     /// Create an interceptor for a GET (download) request.
@@ -107,7 +115,15 @@ impl RdmaInterceptor {
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
     ) -> Self {
-        Self { provider, token, size, rdma_confirmed, debug, checksum_algorithm: None, checksum_value: None }
+        Self {
+            provider,
+            token,
+            size,
+            rdma_confirmed,
+            debug,
+            checksum_algorithm: None,
+            checksum_value: None,
+        }
     }
 }
 
@@ -146,7 +162,10 @@ impl Intercept for RdmaInterceptor {
                 eprintln!("[RdmaInterceptor] injecting checksum headers before signing: alg={alg}");
             }
             headers.insert("x-amz-sdk-checksum-algorithm", alg.clone());
-            headers.insert(format!("x-amz-checksum-{}", alg.to_lowercase()), val.clone());
+            headers.insert(
+                format!("x-amz-checksum-{}", alg.to_lowercase()),
+                val.clone(),
+            );
         }
         Ok(())
     }
@@ -203,10 +222,7 @@ impl Intercept for RdmaInterceptor {
                     &token_bytes,
                     Box::new(move |result| {
                         if result.error_code != 0 {
-                            eprintln!(
-                                "[RdmaInterceptor] RDMA error (code={})",
-                                result.error_code
-                            );
+                            eprintln!("[RdmaInterceptor] RDMA error (code={})", result.error_code);
                         } else if debug {
                             eprintln!("[RdmaInterceptor] RDMA transfer completed");
                         }

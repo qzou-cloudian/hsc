@@ -11,12 +11,12 @@ use walkdir::WalkDir;
 #[cfg(feature = "rdma")]
 use crate::rdma::{RdmaInterceptor, RdmaProvider};
 #[cfg(feature = "rdma")]
+use base64::Engine as _;
+#[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
-#[cfg(feature = "rdma")]
-use base64::Engine as _;
 
 /// Copy files between local and S3
 #[allow(clippy::too_many_arguments)]
@@ -54,7 +54,8 @@ pub async fn copy(
             &filter,
             multipart_threshold,
             multipart_chunksize,
-            #[cfg(feature = "rdma")] rdma,
+            #[cfg(feature = "rdma")]
+            rdma,
         )
         .await
     } else {
@@ -66,7 +67,8 @@ pub async fn copy(
             checksum_opts.1,
             multipart_threshold,
             multipart_chunksize,
-            #[cfg(feature = "rdma")] rdma,
+            #[cfg(feature = "rdma")]
+            rdma,
         )
         .await
     }
@@ -116,7 +118,8 @@ async fn copy_single(
                 checksum_algorithm,
                 multipart_threshold,
                 multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }
@@ -128,7 +131,8 @@ async fn copy_single(
                 key,
                 dst,
                 checksum_mode,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }
@@ -222,7 +226,8 @@ pub async fn upload_file(
             key,
             file_size,
             multipart_chunksize,
-            #[cfg(feature = "rdma")] rdma,
+            #[cfg(feature = "rdma")]
+            rdma,
         )
         .await
     } else {
@@ -241,7 +246,9 @@ pub async fn upload_file(
                     Ok(t) => Some(t),
                     Err(e) => {
                         if e.is_fallback_eligible() {
-                            eprintln!("[rdma] prepare_put_token failed ({e}); falling back to plain HTTP");
+                            eprintln!(
+                                "[rdma] prepare_put_token failed ({e}); falling back to plain HTTP"
+                            );
                         } else {
                             eprintln!("[rdma] prepare_put_token error ({e})");
                         }
@@ -257,8 +264,11 @@ pub async fn upload_file(
             let rdma_body = ByteStream::from_static(b"");
             if let Some(token) = maybe_token {
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
-                let (cksum_alg, cksum_val) =
-                    compute_put_checksum(&buffer, checksum_mode.as_ref(), checksum_algorithm.as_ref());
+                let (cksum_alg, cksum_val) = compute_put_checksum(
+                    &buffer,
+                    checksum_mode.as_ref(),
+                    checksum_algorithm.as_ref(),
+                );
                 let interceptor = RdmaInterceptor::new_put(
                     Arc::clone(provider),
                     token,
@@ -375,10 +385,14 @@ async fn upload_file_multipart(
                 let mut n_read = 0usize;
                 while n_read < chunk_size as usize {
                     let n = file.read(&mut rdma_buffer[n_read..]).await?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     n_read += n;
                 }
-                if n_read == 0 { break; }
+                if n_read == 0 {
+                    break;
+                }
                 bytes_read = n_read;
                 part_data = None;
             } else {
@@ -386,29 +400,38 @@ async fn upload_file_multipart(
                 let mut n_read = 0usize;
                 while n_read < chunk_size as usize {
                     let n = file.read(&mut buffer[n_read..]).await?;
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     n_read += n;
                 }
-                if n_read == 0 { break; }
+                if n_read == 0 {
+                    break;
+                }
                 buffer.truncate(n_read);
                 bytes_read = n_read;
                 part_data = Some(buffer);
             }
         }
         #[cfg(not(feature = "rdma"))]
-        let mut buffer = Vec::new();
+        let buffer;
         #[cfg(not(feature = "rdma"))]
         {
-            buffer = vec![0u8; chunk_size as usize];
+            let mut buf = vec![0u8; chunk_size as usize];
             let mut n_read = 0usize;
             while n_read < chunk_size as usize {
-                let n = file.read(&mut buffer[n_read..]).await?;
-                if n == 0 { break; }
+                let n = file.read(&mut buf[n_read..]).await?;
+                if n == 0 {
+                    break;
+                }
                 n_read += n;
             }
-            if n_read == 0 { break; }
-            buffer.truncate(n_read);
+            if n_read == 0 {
+                break;
+            }
+            buf.truncate(n_read);
             bytes_read = n_read;
+            buffer = buf;
         }
 
         // Upload this part — with RDMA interceptor when a provider is present.
@@ -419,7 +442,9 @@ async fn upload_file_multipart(
                 // (real registration is inside prepare_put_token) but creates the
                 // SHM entry the mock provider needs for each transfer.
                 let registered = rdma_memory_ok
-                    && provider.register_memory(rdma_buffer.as_mut_ptr(), bytes_read).is_ok();
+                    && provider
+                        .register_memory(rdma_buffer.as_mut_ptr(), bytes_read)
+                        .is_ok();
 
                 let maybe_token = if registered {
                     let s3_key = format!("{bucket}/{key}");
@@ -672,7 +697,8 @@ async fn copy_recursive(
                 filter,
                 multipart_threshold,
                 multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }
@@ -683,7 +709,8 @@ async fn copy_recursive(
                 key,
                 dst,
                 filter,
-                #[cfg(feature = "rdma")] rdma,
+                #[cfg(feature = "rdma")]
+                rdma,
             )
             .await
         }
@@ -696,9 +723,7 @@ async fn copy_recursive(
                 bucket: dst_bucket,
                 key: dst_key,
             },
-        ) => {
-            copy_s3_directory(client, src_bucket, src_key, dst_bucket, dst_key, filter).await
-        }
+        ) => copy_s3_directory(client, src_bucket, src_key, dst_bucket, dst_key, filter).await,
         (PathType::Local(_), PathType::Local(_)) => Err(
             "Local to local recursive copy not implemented. Use standard 'cp -r' command.".into(),
         ),
@@ -743,7 +768,8 @@ async fn upload_directory(
                 None,
                 multipart_threshold,
                 multipart_chunksize,
-                #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+                #[cfg(feature = "rdma")]
+                rdma.as_ref().map(Arc::clone),
             )
             .await?;
         }
@@ -795,7 +821,8 @@ async fn download_directory(
                     key,
                     local_path.to_str().unwrap(),
                     None,
-                    #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+                    #[cfg(feature = "rdma")]
+                    rdma.as_ref().map(Arc::clone),
                 )
                 .await?;
             }

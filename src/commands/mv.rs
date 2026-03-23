@@ -31,7 +31,8 @@ pub async fn move_files(
         None, // No checksum for move operations
         multipart_threshold,
         multipart_chunksize,
-        #[cfg(feature = "rdma")] rdma,
+        #[cfg(feature = "rdma")]
+        rdma,
     )
     .await?;
 

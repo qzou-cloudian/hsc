@@ -36,7 +36,8 @@ pub async fn cmp(
         path1,
         start,
         limit,
-        #[cfg(feature = "rdma")] rdma.as_ref().map(Arc::clone),
+        #[cfg(feature = "rdma")]
+        rdma.as_ref().map(Arc::clone),
     )
     .await?;
     let mut reader2 = open_reader(
@@ -44,7 +45,8 @@ pub async fn cmp(
         path2,
         start,
         limit,
-        #[cfg(feature = "rdma")] rdma,
+        #[cfg(feature = "rdma")]
+        rdma,
     )
     .await?;
 
@@ -224,12 +226,7 @@ async fn open_reader(
                 let maybe_token = if suitable {
                     let s3_key = format!("{}/{}", bucket, key);
                     provider
-                        .prepare_get_token(
-                            s3_key.as_bytes(),
-                            buffer.as_mut_ptr(),
-                            byte_count,
-                            0,
-                        )
+                        .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), byte_count, 0)
                         .ok()
                 } else {
                     None
@@ -262,7 +259,10 @@ async fn open_reader(
                     let _ = provider.deregister_memory(raw_ptr);
                 }
                 return Ok(Reader {
-                    inner: ReaderInner::S3 { data: bytes, pos: 0 },
+                    inner: ReaderInner::S3 {
+                        data: bytes,
+                        pos: 0,
+                    },
                     total_size,
                 });
             }
