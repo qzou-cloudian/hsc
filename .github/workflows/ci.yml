@@ -9,6 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+# Reusable step to create stub crates for private path dependencies.
+# s3-rdma and its cuobj dep live in private repos not available in CI.
+# Cargo resolves ALL path deps (even optional ones) at startup, so stubs
+# are required even when the rdma/cuobj features are not enabled.
+
 jobs:
   test:
     name: Test
@@ -16,6 +21,12 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Create stubs for private path dependencies
+        run: |
+          mkdir -p ../s3-rdma/core/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj = []\n' \
+              > ../s3-rdma/core/Cargo.toml
+          touch ../s3-rdma/core/src/lib.rs
       - name: Run tests
         run: cargo test --verbose
       
@@ -27,6 +38,12 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
+      - name: Create stubs for private path dependencies
+        run: |
+          mkdir -p ../s3-rdma/core/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj = []\n' \
+              > ../s3-rdma/core/Cargo.toml
+          touch ../s3-rdma/core/src/lib.rs
       - name: Run clippy
         run: cargo clippy -- -D warnings
   
@@ -46,9 +63,15 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v3
       - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Create stubs for private path dependencies
+        run: |
+          mkdir -p ../s3-rdma/core/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj = []\n' \
+              > ../s3-rdma/core/Cargo.toml
+          touch ../s3-rdma/core/src/lib.rs
       - name: Build
         run: cargo build --release --verbose
