@@ -31,7 +31,7 @@ pub async fn cat(
         return Err("Cannot specify --part-number together with --range or --offset/--size".into());
     }
     if let Some(p) = part_number {
-        if p < 1 || p > 10000 {
+        if !(1..=10000).contains(&p) {
             return Err(format!("--part-number must be between 1 and 10000, got {}", p).into());
         }
     }
@@ -47,13 +47,15 @@ pub async fn cat(
                 client,
                 &bucket,
                 &key,
-                range,
-                offset,
-                size,
-                part_number,
-                version_id,
-                #[cfg(feature = "rdma")]
-                rdma,
+                S3CatOptions {
+                    range,
+                    offset,
+                    size,
+                    part_number,
+                    version_id,
+                    #[cfg(feature = "rdma")]
+                    rdma,
+                },
             )
             .await
         }
@@ -69,18 +71,32 @@ pub async fn cat(
     }
 }
 
-/// Read and output S3 object content
-async fn cat_s3_object(
-    client: &Client,
-    bucket: &str,
-    key: &str,
+struct S3CatOptions {
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
     part_number: Option<i32>,
     version_id: Option<String>,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")]
+    rdma: Option<Arc<dyn RdmaProvider>>,
+}
+
+/// Read and output S3 object content
+async fn cat_s3_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    opts: S3CatOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let S3CatOptions {
+        range,
+        offset,
+        size,
+        part_number,
+        version_id,
+        #[cfg(feature = "rdma")]
+        rdma,
+    } = opts;
     // Build the Range header string (if any).
     let range_hdr = if let Some(range_str) = range {
         Some(if range_str.starts_with("bytes=") {
