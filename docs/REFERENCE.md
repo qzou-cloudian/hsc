@@ -274,15 +274,24 @@ hsc cat <path> [options]
 **Options:**
 - `--range <start-end>` - Read specific byte range (e.g., "0-999" or "bytes=0-999")
 - `--offset <bytes>` - Start reading from offset
-- `--size <bytes>` - Read specific number of bytes
+- `--size <bytes>` - Read specific number of bytes (used with `--offset`)
+- `--part-number <n>` - Download a specific part of a multipart-uploaded S3 object (1–10000)
+- `--version-id <id>` - Return a specific version of an S3 object (requires bucket versioning)
+
+**Notes:**
+- `--part-number` and `--range`/`--offset`/`--size` are mutually exclusive
+- `--part-number` and `--version-id` apply to S3 objects only
 
 **Examples:**
 ```bash
-hsc cat s3://bucket/file.txt                    # Print entire file
-hsc cat file.txt --range 0-100                  # First 101 bytes
-hsc cat s3://bucket/log.txt --offset 1000       # Skip first 1000 bytes
-hsc cat file.txt --offset 100 --size 50         # Read bytes 100-149
-hsc cat s3://bucket/data.txt | grep ERROR       # Pipe to other tools
+hsc cat s3://bucket/file.txt                       # Print entire file
+hsc cat file.txt --range 0-100                     # First 101 bytes
+hsc cat s3://bucket/log.txt --offset 1000          # Skip first 1000 bytes
+hsc cat file.txt --offset 100 --size 50            # Read bytes 100-149
+hsc cat s3://bucket/data.bin --part-number 1       # First part of multipart upload
+hsc cat s3://bucket/data.bin --part-number 3       # Third part only
+hsc cat s3://bucket/file.txt --version-id abc123   # Specific version
+hsc cat s3://bucket/data.txt | grep ERROR          # Pipe to other tools
 ```
 
 ## Filter Patterns

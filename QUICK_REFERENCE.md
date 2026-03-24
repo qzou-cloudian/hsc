@@ -43,6 +43,8 @@ hsc diff ./local s3://bucket/remote/  # Compare directories
 ```bash
 hsc cat s3://bucket/file.txt          # Print to stdout
 hsc cat file.txt --range 0-999        # First 1000 bytes
+hsc cat s3://bucket/data.bin --part-number 2   # Second part of multipart upload
+hsc cat s3://bucket/file.txt --version-id abc  # Specific version
 hsc cat s3://log.txt | grep ERROR     # Pipe to other tools
 hsc cmp file.txt s3://bucket/file.txt # Compare byte-by-byte (exit 0=same, 1=differ)
 hsc cmp --range 0-999 a.bin b.bin     # Compare a specific byte range

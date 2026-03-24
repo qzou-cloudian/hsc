@@ -19,11 +19,21 @@ pub async fn cat(
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
+    part_number: Option<i32>,
+    version_id: Option<String>,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate options
     if range.is_some() && (offset.is_some() || size.is_some()) {
         return Err("Cannot specify both --range and --offset/--size options".into());
+    }
+    if part_number.is_some() && (range.is_some() || offset.is_some() || size.is_some()) {
+        return Err("Cannot specify --part-number together with --range or --offset/--size".into());
+    }
+    if let Some(p) = part_number {
+        if p < 1 || p > 10000 {
+            return Err(format!("--part-number must be between 1 and 10000, got {}", p).into());
+        }
     }
 
     let path_type = parse_path(path)?;
@@ -40,12 +50,22 @@ pub async fn cat(
                 range,
                 offset,
                 size,
+                part_number,
+                version_id,
                 #[cfg(feature = "rdma")]
                 rdma,
             )
             .await
         }
-        PathType::Local(local_path) => cat_local_file(&local_path, range, offset, size).await,
+        PathType::Local(local_path) => {
+            if part_number.is_some() {
+                return Err("--part-number is only supported for S3 objects".into());
+            }
+            if version_id.is_some() {
+                return Err("--version-id is only supported for S3 objects".into());
+            }
+            cat_local_file(&local_path, range, offset, size).await
+        }
     }
 }
 
@@ -57,6 +77,8 @@ async fn cat_s3_object(
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
+    part_number: Option<i32>,
+    version_id: Option<String>,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Build the Range header string (if any).
@@ -96,10 +118,11 @@ async fn cat_s3_object(
             })
         } else {
             // Full object — HEAD for size
-            client
-                .head_object()
-                .bucket(bucket)
-                .key(key)
+            let mut head_req = client.head_object().bucket(bucket).key(key);
+            if let Some(ref v) = version_id {
+                head_req = head_req.version_id(v.clone());
+            }
+            head_req
                 .send()
                 .await
                 .ok()
@@ -125,6 +148,12 @@ async fn cat_s3_object(
             let mut request = client.get_object().bucket(bucket).key(key);
             if let Some(ref r) = range_hdr {
                 request = request.range(r.clone());
+            }
+            if let Some(p) = part_number {
+                request = request.part_number(p);
+            }
+            if let Some(ref v) = version_id {
+                request = request.version_id(v.clone());
             }
             let rdma_confirmed = Arc::new(AtomicBool::new(false));
             let response = if let Some(token) = maybe_token {
@@ -159,6 +188,12 @@ async fn cat_s3_object(
     let mut request = client.get_object().bucket(bucket).key(key);
     if let Some(r) = range_hdr {
         request = request.range(r);
+    }
+    if let Some(p) = part_number {
+        request = request.part_number(p);
+    }
+    if let Some(v) = version_id {
+        request = request.version_id(v);
     }
     let response = request.send().await?;
     let mut body = response.body;

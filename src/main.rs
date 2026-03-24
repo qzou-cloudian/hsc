@@ -187,6 +187,12 @@ enum Commands {
         /// Number of bytes to read (used with --offset)
         #[arg(long)]
         size: Option<u64>,
+        /// Download a specific part of a multipart-uploaded object (1-based)
+        #[arg(long)]
+        part_number: Option<i32>,
+        /// Return a specific version of the object (S3 versioning)
+        #[arg(long)]
+        version_id: Option<String>,
     },
     /// Compare two files or objects byte-by-byte
     Cmp {
@@ -364,6 +370,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             range,
             offset,
             size,
+            part_number,
+            version_id,
         } => {
             commands::cat::cat(
                 &client,
@@ -371,6 +379,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 range,
                 offset,
                 size,
+                part_number,
+                version_id,
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
