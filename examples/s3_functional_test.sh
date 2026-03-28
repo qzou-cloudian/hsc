@@ -184,8 +184,8 @@ create_test_file() {
 
     # Convert size to bytes for dd
     case $size in
-        *k) dd if=/dev/zero of="$filename" bs=1024 count=${size%k} status=none ;;
-        *m) dd if=/dev/zero of="$filename" bs=1048576 count=${size%m} status=none ;;
+        *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} status=none ;;
+        *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} status=none ;;
     esac
 
     success "Created $filename ($(du -h "$filename" | cut -f1))"
@@ -210,8 +210,8 @@ for size in "${SIZES[@]}"; do
     (
         filename="$TEST_DIR/testfile_${size}.dat"
         case $size in
-            *k) dd if=/dev/zero of="$filename" bs=1024 count=${size%k} status=none ;;
-            *m) dd if=/dev/zero of="$filename" bs=1048576 count=${size%m} status=none ;;
+            *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} status=none ;;
+            *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} status=none ;;
         esac
     ) &
 done
@@ -267,9 +267,9 @@ for part_size in "${MULTIPART_SIZES[@]}"; do
             16m) count=16 ;;
             32m) count=32 ;;
         esac
-        dd if=/dev/zero of="$part1" bs=1048576 count=$count status=none &
-        dd if=/dev/zero of="$part2" bs=1048576 count=$count status=none &
-        dd if=/dev/zero of="$part3" bs=1048576 count=$count status=none &
+        dd if=/dev/random of="$part1" bs=1048576 count=$count status=none &
+        dd if=/dev/random of="$part2" bs=1048576 count=$count status=none &
+        dd if=/dev/random of="$part3" bs=1048576 count=$count status=none &
         wait
 
         # Combine parts into one file
