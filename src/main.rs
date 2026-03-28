@@ -103,6 +103,24 @@ enum Commands {
         /// Checksum algorithm (ENABLED, CRC32, CRC32C, SHA1, SHA256); bare --checksum enables with default algorithm
         #[arg(long, num_args = 0..=1, default_missing_value = "ENABLED")]
         checksum: Option<String>,
+        /// Server-side encryption algorithm for destination (AES256, aws:kms, aws:kms:dsse)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse: Option<String>,
+        /// KMS key ARN or alias (used with --sse aws:kms or aws:kms:dsse)
+        #[arg(long, value_name = "KEY_ID")]
+        sse_kms_key_id: Option<String>,
+        /// SSE-C algorithm for destination (AES256)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse_c: Option<String>,
+        /// Base64-encoded 256-bit customer key for SSE-C destination encryption/decryption
+        #[arg(long, value_name = "KEY")]
+        sse_c_key: Option<String>,
+        /// SSE-C algorithm for the copy source (S3-to-S3 copies only)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse_c_copy_source: Option<String>,
+        /// Base64-encoded 256-bit customer key for SSE-C copy source decryption
+        #[arg(long, value_name = "KEY")]
+        sse_c_copy_source_key: Option<String>,
     },
     /// Synchronize directories
     Sync {
@@ -116,6 +134,24 @@ enum Commands {
         /// Exclude files matching pattern (can be specified multiple times)
         #[arg(long)]
         exclude: Vec<String>,
+        /// Server-side encryption algorithm for destination (AES256, aws:kms, aws:kms:dsse)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse: Option<String>,
+        /// KMS key ARN or alias (used with --sse aws:kms or aws:kms:dsse)
+        #[arg(long, value_name = "KEY_ID")]
+        sse_kms_key_id: Option<String>,
+        /// SSE-C algorithm for destination (AES256)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse_c: Option<String>,
+        /// Base64-encoded 256-bit customer key for SSE-C destination encryption/decryption
+        #[arg(long, value_name = "KEY")]
+        sse_c_key: Option<String>,
+        /// SSE-C algorithm for the copy source (S3-to-S3 copies only)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse_c_copy_source: Option<String>,
+        /// Base64-encoded 256-bit customer key for SSE-C copy source decryption
+        #[arg(long, value_name = "KEY")]
+        sse_c_copy_source_key: Option<String>,
     },
     /// Move files
     Mv {
@@ -132,6 +168,24 @@ enum Commands {
         /// Exclude files matching pattern (can be specified multiple times)
         #[arg(long)]
         exclude: Vec<String>,
+        /// Server-side encryption algorithm for destination (AES256, aws:kms, aws:kms:dsse)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse: Option<String>,
+        /// KMS key ARN or alias (used with --sse aws:kms or aws:kms:dsse)
+        #[arg(long, value_name = "KEY_ID")]
+        sse_kms_key_id: Option<String>,
+        /// SSE-C algorithm for destination (AES256)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse_c: Option<String>,
+        /// Base64-encoded 256-bit customer key for SSE-C destination encryption/decryption
+        #[arg(long, value_name = "KEY")]
+        sse_c_key: Option<String>,
+        /// SSE-C algorithm for the copy source (S3-to-S3 copies only)
+        #[arg(long, value_name = "ALGORITHM")]
+        sse_c_copy_source: Option<String>,
+        /// Base64-encoded 256-bit customer key for SSE-C copy source decryption
+        #[arg(long, value_name = "KEY")]
+        sse_c_copy_source_key: Option<String>,
     },
     /// Remove S3 objects
     Rm {
@@ -291,7 +345,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             include,
             exclude,
             checksum,
+            sse,
+            sse_kms_key_id,
+            sse_c,
+            sse_c_key,
+            sse_c_copy_source,
+            sse_c_copy_source_key,
         } => {
+            let sse_config = commands::cp::SseConfig {
+                sse,
+                sse_kms_key_id,
+                sse_c,
+                sse_c_key,
+                sse_c_copy_source,
+                sse_c_copy_source_key,
+            };
             commands::cp::copy(
                 &client,
                 &source,
@@ -300,6 +368,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 include,
                 exclude,
                 checksum,
+                sse_config,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
                 #[cfg(feature = "rdma")]
@@ -312,13 +381,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dest,
             include,
             exclude,
+            sse,
+            sse_kms_key_id,
+            sse_c,
+            sse_c_key,
+            sse_c_copy_source,
+            sse_c_copy_source_key,
         } => {
+            let sse_config = commands::cp::SseConfig {
+                sse,
+                sse_kms_key_id,
+                sse_c,
+                sse_c_key,
+                sse_c_copy_source,
+                sse_c_copy_source_key,
+            };
             commands::sync::sync(
                 &client,
                 &source,
                 &dest,
                 include,
                 exclude,
+                sse_config,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
                 #[cfg(feature = "rdma")]
@@ -332,7 +416,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             recursive,
             include,
             exclude,
+            sse,
+            sse_kms_key_id,
+            sse_c,
+            sse_c_key,
+            sse_c_copy_source,
+            sse_c_copy_source_key,
         } => {
+            let sse_config = commands::cp::SseConfig {
+                sse,
+                sse_kms_key_id,
+                sse_c,
+                sse_c_key,
+                sse_c_copy_source,
+                sse_c_copy_source_key,
+            };
             commands::mv::move_files(
                 &client,
                 &source,
@@ -340,6 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 recursive,
                 include,
                 exclude,
+                sse_config,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
                 #[cfg(feature = "rdma")]

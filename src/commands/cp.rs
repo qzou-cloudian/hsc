@@ -1,7 +1,9 @@
 use crate::filters::FileFilter;
 use crate::path_utils::{join_s3_key, parse_path, PathType};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{
+    ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart, ServerSideEncryption,
+};
 use aws_sdk_s3::Client;
 use std::path::Path;
 use tokio::fs;
@@ -12,11 +14,37 @@ use walkdir::WalkDir;
 use crate::rdma::{RdmaInterceptor, RdmaProvider};
 #[cfg(feature = "rdma")]
 use base64::Engine as _;
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 #[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
 };
+
+/// Server-side encryption options, matching AWS S3 CLI conventions.
+#[derive(Clone, Default, Debug)]
+pub struct SseConfig {
+    /// `--sse`: destination SSE algorithm ("AES256", "aws:kms", "aws:kms:dsse")
+    pub sse: Option<String>,
+    /// `--sse-kms-key-id`: AWS KMS key ARN or alias
+    pub sse_kms_key_id: Option<String>,
+    /// `--sse-c`: SSE-C algorithm for the destination object (typically "AES256")
+    pub sse_c: Option<String>,
+    /// `--sse-c-key`: base64-encoded 256-bit customer-provided key for the destination
+    pub sse_c_key: Option<String>,
+    /// `--sse-c-copy-source`: SSE-C algorithm for the copy source (S3-to-S3 only)
+    pub sse_c_copy_source: Option<String>,
+    /// `--sse-c-copy-source-key`: base64-encoded customer-provided key for the copy source
+    pub sse_c_copy_source_key: Option<String>,
+}
+
+/// Compute `base64(MD5(raw_key_bytes))` required by S3 for SSE-C requests.
+fn sse_c_key_md5(key_b64: &str) -> Result<String, Box<dyn std::error::Error>> {
+    use md5::{Digest, Md5};
+    let raw = STANDARD.decode(key_b64)?;
+    let digest = Md5::digest(&raw);
+    Ok(STANDARD.encode(digest))
+}
 
 /// Copy files between local and S3
 #[allow(clippy::too_many_arguments)]
@@ -28,6 +56,7 @@ pub async fn copy(
     include: Vec<String>,
     exclude: Vec<String>,
     checksum: Option<String>,
+    sse: SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -52,6 +81,7 @@ pub async fn copy(
             source_type,
             dest_type,
             &filter,
+            &sse,
             multipart_threshold,
             multipart_chunksize,
             #[cfg(feature = "rdma")]
@@ -65,6 +95,7 @@ pub async fn copy(
             dest_type,
             checksum_opts.0,
             checksum_opts.1,
+            &sse,
             multipart_threshold,
             multipart_chunksize,
             #[cfg(feature = "rdma")]
@@ -102,6 +133,7 @@ async fn copy_single(
     dest: PathType,
     checksum_mode: Option<ChecksumMode>,
     checksum_algorithm: Option<ChecksumAlgorithm>,
+    sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -116,6 +148,7 @@ async fn copy_single(
                 key,
                 checksum_mode,
                 checksum_algorithm,
+                sse,
                 multipart_threshold,
                 multipart_chunksize,
                 #[cfg(feature = "rdma")]
@@ -131,6 +164,7 @@ async fn copy_single(
                 key,
                 dst,
                 checksum_mode,
+                sse,
                 #[cfg(feature = "rdma")]
                 rdma,
             )
@@ -147,7 +181,7 @@ async fn copy_single(
             },
         ) => {
             // S3 to S3
-            copy_s3_to_s3(client, src_bucket, src_key, dst_bucket, dst_key).await
+            copy_s3_to_s3(client, src_bucket, src_key, dst_bucket, dst_key, sse).await
         }
         (PathType::Local(src), PathType::Local(dst)) => {
             // Local to local
@@ -196,7 +230,7 @@ fn compute_put_checksum(
         }
         _ => return (None, None),
     };
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let encoded = STANDARD.encode(&bytes);
     (Some(name.to_string()), Some(encoded))
 }
 
@@ -209,6 +243,7 @@ pub async fn upload_file(
     key: &str,
     checksum_mode: Option<ChecksumMode>,
     checksum_algorithm: Option<ChecksumAlgorithm>,
+    sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -226,6 +261,9 @@ pub async fn upload_file(
             key,
             file_size,
             multipart_chunksize,
+            checksum_mode,
+            checksum_algorithm,
+            sse,
             #[cfg(feature = "rdma")]
             rdma,
         )
@@ -311,6 +349,20 @@ pub async fn upload_file(
             request =
                 request.checksum_algorithm(checksum_algorithm.unwrap_or(ChecksumAlgorithm::Crc32));
         }
+        if let Some(ref alg) = sse.sse {
+            request = request.server_side_encryption(ServerSideEncryption::from(alg.as_str()));
+        }
+        if let Some(ref kid) = sse.sse_kms_key_id {
+            request = request.ssekms_key_id(kid.clone());
+        }
+        if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+            let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+            request = request.sse_customer_algorithm(algo);
+            if let Some(ref key) = sse.sse_c_key {
+                let md5 = sse_c_key_md5(key)?;
+                request = request.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+            }
+        }
         request.send().await?;
         println!("Uploaded: {} -> s3://{}/{}", local_path, bucket, key);
         Ok(())
@@ -318,6 +370,7 @@ pub async fn upload_file(
 }
 
 /// Upload a file to S3 using multipart upload
+#[allow(clippy::too_many_arguments)]
 async fn upload_file_multipart(
     client: &Client,
     local_path: &str,
@@ -325,6 +378,9 @@ async fn upload_file_multipart(
     key: &str,
     file_size: u64,
     chunk_size: u64,
+    checksum_mode: Option<ChecksumMode>,
+    checksum_algorithm: Option<ChecksumAlgorithm>,
+    sse: &SseConfig,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
@@ -332,13 +388,33 @@ async fn upload_file_multipart(
         local_path, file_size, chunk_size
     );
 
+    let effective_algo = checksum_algorithm
+        .clone()
+        .unwrap_or(ChecksumAlgorithm::Crc32);
+
     // Step 1: Create multipart upload
-    let multipart_upload = client
+    let mut create_req = client
         .create_multipart_upload()
         .bucket(bucket)
-        .key(key)
-        .send()
-        .await?;
+        .key(key);
+    if checksum_mode.is_some() {
+        create_req = create_req.checksum_algorithm(effective_algo.clone());
+    }
+    if let Some(ref alg) = sse.sse {
+        create_req = create_req.server_side_encryption(ServerSideEncryption::from(alg.as_str()));
+    }
+    if let Some(ref kid) = sse.sse_kms_key_id {
+        create_req = create_req.ssekms_key_id(kid.clone());
+    }
+    if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+        let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+        create_req = create_req.sse_customer_algorithm(algo);
+        if let Some(ref key) = sse.sse_c_key {
+            let md5 = sse_c_key_md5(key)?;
+            create_req = create_req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+        }
+    }
+    let multipart_upload = create_req.send().await?;
 
     let upload_id = multipart_upload
         .upload_id()
@@ -457,14 +533,19 @@ async fn upload_file_multipart(
 
                 let resp = if let Some(token) = maybe_token {
                     let rdma_confirmed = Arc::new(AtomicBool::new(false));
+                    let (cksum_alg, cksum_val) = compute_put_checksum(
+                        &rdma_buffer[..bytes_read],
+                        checksum_mode.as_ref(),
+                        checksum_algorithm.as_ref(),
+                    );
                     let interceptor = RdmaInterceptor::new_put(
                         Arc::clone(provider),
                         token,
                         bytes_read,
                         rdma_confirmed,
                         false,
-                        None,
-                        None,
+                        cksum_alg,
+                        cksum_val,
                     );
                     client
                         .upload_part()
@@ -480,15 +561,25 @@ async fn upload_file_multipart(
                 } else {
                     // RDMA token unavailable — fall back to plain HTTP body.
                     let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
-                    client
+                    let mut req = client
                         .upload_part()
                         .bucket(bucket)
                         .key(key)
                         .upload_id(upload_id)
                         .part_number(part_number)
-                        .body(ByteStream::from(body))
-                        .send()
-                        .await?
+                        .body(ByteStream::from(body));
+                    if checksum_mode.is_some() {
+                        req = req.checksum_algorithm(effective_algo.clone());
+                    }
+                    if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+                        let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+                        req = req.sse_customer_algorithm(algo);
+                        if let Some(ref key) = sse.sse_c_key {
+                            let md5 = sse_c_key_md5(key)?;
+                            req = req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+                        }
+                    }
+                    req.send().await?
                 };
 
                 // Deregister the buffer.  If process_reply_token already cleaned
@@ -499,28 +590,48 @@ async fn upload_file_multipart(
                 }
                 resp
             } else {
-                client
+                let mut req = client
                     .upload_part()
                     .bucket(bucket)
                     .key(key)
                     .upload_id(upload_id)
                     .part_number(part_number)
-                    .body(ByteStream::from(part_data.unwrap()))
-                    .send()
-                    .await?
+                    .body(ByteStream::from(part_data.unwrap()));
+                if checksum_mode.is_some() {
+                    req = req.checksum_algorithm(effective_algo.clone());
+                }
+                if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+                    let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+                    req = req.sse_customer_algorithm(algo);
+                    if let Some(ref key) = sse.sse_c_key {
+                        let md5 = sse_c_key_md5(key)?;
+                        req = req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+                    }
+                }
+                req.send().await?
             }
         };
         #[cfg(not(feature = "rdma"))]
         let upload_part_response = {
-            client
+            let mut req = client
                 .upload_part()
                 .bucket(bucket)
                 .key(key)
                 .upload_id(upload_id)
                 .part_number(part_number)
-                .body(ByteStream::from(buffer))
-                .send()
-                .await?
+                .body(ByteStream::from(buffer));
+            if checksum_mode.is_some() {
+                req = req.checksum_algorithm(effective_algo.clone());
+            }
+            if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+                let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+                req = req.sse_customer_algorithm(algo);
+                if let Some(ref key) = sse.sse_c_key {
+                    let md5 = sse_c_key_md5(key)?;
+                    req = req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+                }
+            }
+            req.send().await?
         };
 
         let etag = upload_part_response
@@ -528,12 +639,35 @@ async fn upload_file_multipart(
             .ok_or("Failed to get ETag for part")?
             .to_string();
 
-        parts.push(
-            CompletedPart::builder()
-                .part_number(part_number)
-                .e_tag(etag)
-                .build(),
-        );
+        let mut part_builder = CompletedPart::builder()
+            .part_number(part_number)
+            .e_tag(etag);
+        if checksum_mode.is_some() {
+            match effective_algo {
+                ChecksumAlgorithm::Crc32 => {
+                    if let Some(v) = upload_part_response.checksum_crc32() {
+                        part_builder = part_builder.checksum_crc32(v);
+                    }
+                }
+                ChecksumAlgorithm::Crc32C => {
+                    if let Some(v) = upload_part_response.checksum_crc32_c() {
+                        part_builder = part_builder.checksum_crc32_c(v);
+                    }
+                }
+                ChecksumAlgorithm::Sha1 => {
+                    if let Some(v) = upload_part_response.checksum_sha1() {
+                        part_builder = part_builder.checksum_sha1(v);
+                    }
+                }
+                ChecksumAlgorithm::Sha256 => {
+                    if let Some(v) = upload_part_response.checksum_sha256() {
+                        part_builder = part_builder.checksum_sha256(v);
+                    }
+                }
+                _ => {}
+            }
+        }
+        parts.push(part_builder.build());
 
         uploaded_bytes += bytes_read as u64;
         println!(
@@ -573,12 +707,14 @@ async fn upload_file_multipart(
 }
 
 /// Download a file from S3
+#[allow(clippy::too_many_arguments)]
 pub async fn download_file(
     client: &Client,
     bucket: &str,
     key: &str,
     local_path: &str,
     checksum_mode: Option<ChecksumMode>,
+    sse: &SseConfig,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create parent directories if needed
@@ -608,6 +744,14 @@ pub async fn download_file(
         let mut request = client.get_object().bucket(bucket).key(key);
         if let Some(mode) = checksum_mode {
             request = request.checksum_mode(mode);
+        }
+        if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+            let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+            request = request.sse_customer_algorithm(algo);
+            if let Some(ref key_val) = sse.sse_c_key {
+                let md5 = sse_c_key_md5(key_val)?;
+                request = request.sse_customer_key(key_val.clone()).sse_customer_key_md5(md5);
+            }
         }
         let rdma_confirmed = Arc::new(AtomicBool::new(false));
         let response = if let Some(token) = maybe_token {
@@ -642,6 +786,14 @@ pub async fn download_file(
     if let Some(mode) = checksum_mode {
         request = request.checksum_mode(mode);
     }
+    if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+        let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+        request = request.sse_customer_algorithm(algo);
+        if let Some(ref key_val) = sse.sse_c_key {
+            let md5 = sse_c_key_md5(key_val)?;
+            request = request.sse_customer_key(key_val.clone()).sse_customer_key_md5(md5);
+        }
+    }
     let response = request.send().await?;
     let mut file = fs::File::create(local_path).await?;
     let mut body = response.body;
@@ -659,17 +811,42 @@ pub async fn copy_s3_to_s3(
     src_key: &str,
     dst_bucket: &str,
     dst_key: &str,
+    sse: &SseConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let copy_source = format!("{}/{}", src_bucket, src_key);
-
-    client
+    let mut request = client
         .copy_object()
         .copy_source(&copy_source)
         .bucket(dst_bucket)
-        .key(dst_key)
-        .send()
-        .await?;
-
+        .key(dst_key);
+    if let Some(ref alg) = sse.sse {
+        request = request.server_side_encryption(ServerSideEncryption::from(alg.as_str()));
+    }
+    if let Some(ref kid) = sse.sse_kms_key_id {
+        request = request.ssekms_key_id(kid.clone());
+    }
+    if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+        let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+        request = request.sse_customer_algorithm(algo);
+        if let Some(ref key) = sse.sse_c_key {
+            let md5 = sse_c_key_md5(key)?;
+            request = request.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+        }
+    }
+    if sse.sse_c_copy_source.is_some() || sse.sse_c_copy_source_key.is_some() {
+        let algo = sse
+            .sse_c_copy_source
+            .clone()
+            .unwrap_or_else(|| "AES256".to_string());
+        request = request.copy_source_sse_customer_algorithm(algo);
+        if let Some(ref key) = sse.sse_c_copy_source_key {
+            let md5 = sse_c_key_md5(key)?;
+            request = request
+                .copy_source_sse_customer_key(key.clone())
+                .copy_source_sse_customer_key_md5(md5);
+        }
+    }
+    request.send().await?;
     println!(
         "Copied: s3://{}/{} -> s3://{}/{}",
         src_bucket, src_key, dst_bucket, dst_key
@@ -678,11 +855,13 @@ pub async fn copy_s3_to_s3(
 }
 
 /// Copy files recursively
+#[allow(clippy::too_many_arguments)]
 async fn copy_recursive(
     client: &Client,
     source: PathType,
     dest: PathType,
     filter: &FileFilter,
+    sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -695,6 +874,7 @@ async fn copy_recursive(
                 bucket,
                 key,
                 filter,
+                sse,
                 multipart_threshold,
                 multipart_chunksize,
                 #[cfg(feature = "rdma")]
@@ -709,6 +889,7 @@ async fn copy_recursive(
                 key,
                 dst,
                 filter,
+                sse,
                 #[cfg(feature = "rdma")]
                 rdma,
             )
@@ -723,7 +904,7 @@ async fn copy_recursive(
                 bucket: dst_bucket,
                 key: dst_key,
             },
-        ) => copy_s3_directory(client, src_bucket, src_key, dst_bucket, dst_key, filter).await,
+        ) => copy_s3_directory(client, src_bucket, src_key, dst_bucket, dst_key, filter, sse).await,
         (PathType::Local(_), PathType::Local(_)) => Err(
             "Local to local recursive copy not implemented. Use standard 'cp -r' command.".into(),
         ),
@@ -738,6 +919,7 @@ async fn upload_directory(
     bucket: &str,
     s3_prefix: &str,
     filter: &FileFilter,
+    sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -766,6 +948,7 @@ async fn upload_directory(
                 &s3_key,
                 None,
                 None,
+                sse,
                 multipart_threshold,
                 multipart_chunksize,
                 #[cfg(feature = "rdma")]
@@ -779,12 +962,14 @@ async fn upload_directory(
 }
 
 /// Download S3 prefix to local directory
+#[allow(clippy::too_many_arguments)]
 async fn download_directory(
     client: &Client,
     bucket: &str,
     prefix: &str,
     local_dir: &str,
     filter: &FileFilter,
+    sse: &SseConfig,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut continuation_token: Option<String> = None;
@@ -821,6 +1006,7 @@ async fn download_directory(
                     key,
                     local_path.to_str().unwrap(),
                     None,
+                    sse,
                     #[cfg(feature = "rdma")]
                     rdma.as_ref().map(Arc::clone),
                 )
@@ -846,6 +1032,7 @@ async fn copy_s3_directory(
     dst_bucket: &str,
     dst_prefix: &str,
     filter: &FileFilter,
+    sse: &SseConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut continuation_token: Option<String> = None;
 
@@ -876,7 +1063,7 @@ async fn copy_s3_directory(
                 };
 
                 let dst_key = join_s3_key(dst_prefix, relative_key);
-                copy_s3_to_s3(client, src_bucket, key, dst_bucket, &dst_key).await?;
+                copy_s3_to_s3(client, src_bucket, key, dst_bucket, &dst_key, sse).await?;
             }
         }
 

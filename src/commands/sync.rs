@@ -1,3 +1,4 @@
+use crate::commands::cp::SseConfig;
 use crate::filters::FileFilter;
 use crate::path_utils::{join_s3_key, parse_path, PathType};
 use aws_sdk_s3::Client;
@@ -19,6 +20,7 @@ pub async fn sync(
     dest: &str,
     include: Vec<String>,
     exclude: Vec<String>,
+    sse: SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -35,6 +37,7 @@ pub async fn sync(
                 bucket,
                 key,
                 &filter,
+                &sse,
                 multipart_threshold,
                 multipart_chunksize,
                 #[cfg(feature = "rdma")]
@@ -49,6 +52,7 @@ pub async fn sync(
                 key,
                 dst,
                 &filter,
+                &sse,
                 #[cfg(feature = "rdma")]
                 rdma,
             )
@@ -63,7 +67,7 @@ pub async fn sync(
                 bucket: dst_bucket,
                 key: dst_key,
             },
-        ) => sync_s3_to_s3(client, src_bucket, src_key, dst_bucket, dst_key, &filter).await,
+        ) => sync_s3_to_s3(client, src_bucket, src_key, dst_bucket, dst_key, &filter, &sse).await,
         (PathType::Local(_), PathType::Local(_)) => {
             Err("Local to local sync not implemented. Use standard 'rsync' command.".into())
         }
@@ -78,6 +82,7 @@ async fn sync_local_to_s3(
     bucket: &str,
     s3_prefix: &str,
     filter: &FileFilter,
+    sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -124,6 +129,7 @@ async fn sync_local_to_s3(
                     &s3_key,
                     None,
                     None,
+                    sse,
                     multipart_threshold,
                     multipart_chunksize,
                     #[cfg(feature = "rdma")]
@@ -151,6 +157,7 @@ async fn sync_s3_to_local(
     prefix: &str,
     local_dir: &str,
     filter: &FileFilter,
+    sse: &SseConfig,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::download_file;
@@ -201,6 +208,7 @@ async fn sync_s3_to_local(
                         key,
                         local_path.to_str().unwrap(),
                         None,
+                        sse,
                         #[cfg(feature = "rdma")]
                         rdma.as_ref().map(Arc::clone),
                     )
@@ -234,6 +242,7 @@ async fn sync_s3_to_s3(
     dst_bucket: &str,
     dst_prefix: &str,
     filter: &FileFilter,
+    sse: &SseConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::copy_s3_to_s3;
 
@@ -282,7 +291,7 @@ async fn sync_s3_to_s3(
                 };
 
                 if needs_sync {
-                    copy_s3_to_s3(client, src_bucket, key, dst_bucket, &dst_key).await?;
+                    copy_s3_to_s3(client, src_bucket, key, dst_bucket, &dst_key, sse).await?;
                     synced_count += 1;
                 } else {
                     skipped_count += 1;
