@@ -254,6 +254,14 @@ enum Commands {
         #[arg(long)]
         version_id: Option<String>,
     },
+    /// List object versions in an S3 bucket or for a specific key
+    Versions {
+        /// S3 URI (s3://bucket[/prefix])
+        path: String,
+        /// Format sizes in human-readable units (KB, MB, GB)
+        #[arg(long)]
+        human_readable: bool,
+    },
     /// Compare two files or objects byte-by-byte
     Cmp {
         /// First path (local path or s3://bucket/key)
@@ -494,6 +502,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rdma_provider,
             )
             .await
+        }
+        Commands::Versions { path, human_readable } => {
+            commands::versions::list_versions(&client, &path, human_readable).await
         }
         Commands::Cmp {
             path1,
