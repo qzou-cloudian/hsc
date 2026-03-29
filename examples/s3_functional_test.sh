@@ -68,8 +68,15 @@ if [[ -n "$HSC_SSE" ]]; then
     esac
 fi
 
-# Configuration from config file
-BUCKET_NAME="test-bucket-$(date +%s)"
+# Bucket name: first positional argument, or auto-generated.
+# When a bucket is supplied the create (Step 1) and delete (Step 10) steps are skipped,
+# allowing the script to be run against a pre-existing bucket.
+#
+# Usage:
+#   ./examples/s3_functional_test.sh                    # create+delete a temp bucket
+#   ./examples/s3_functional_test.sh my-bucket          # use existing bucket, skip mb/rb
+BUCKET_NAME="${1:-test-bucket-$(date +%s)}"
+BUCKET_PROVIDED="${1:+true}"   # non-empty when caller supplied a bucket name
 TEST_DIR="./test_data"
 RESULTS_DIR=$(mktemp -d)
 trap 'rm -rf "$RESULTS_DIR"' EXIT
@@ -193,12 +200,16 @@ create_test_file() {
 
 # Step 1: Create bucket
 echo ""
-info "Step 1: Creating bucket '$BUCKET_NAME'..."
-if $BINARY mb "s3://$BUCKET_NAME"; then
-    success "Bucket created successfully"
+if [[ -n "$BUCKET_PROVIDED" ]]; then
+    info "Step 1: Using existing bucket '$BUCKET_NAME' (skipping mb)"
 else
-    error "Failed to create bucket"
-    exit 1
+    info "Step 1: Creating bucket '$BUCKET_NAME'..."
+    if $BINARY mb "s3://$BUCKET_NAME"; then
+        success "Bucket created successfully"
+    else
+        error "Failed to create bucket"
+        exit 1
+    fi
 fi
 
 # Step 2: Create test files and upload objects
@@ -1183,11 +1194,15 @@ fi
 # Step 10: Delete bucket
 step_time
 echo ""
-info "Step 10: Deleting bucket '$BUCKET_NAME'..."
-if $BINARY rb "s3://$BUCKET_NAME"; then
-    success "Bucket deleted successfully"
+if [[ -n "$BUCKET_PROVIDED" ]]; then
+    info "Step 10: Skipping bucket deletion (bucket '$BUCKET_NAME' was provided by caller)"
 else
-    error "Failed to delete bucket"
+    info "Step 10: Deleting bucket '$BUCKET_NAME'..."
+    if $BINARY rb "s3://$BUCKET_NAME"; then
+        success "Bucket deleted successfully"
+    else
+        error "Failed to delete bucket"
+    fi
 fi
 
 # Cleanup local test files
