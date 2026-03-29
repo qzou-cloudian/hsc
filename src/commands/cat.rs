@@ -13,6 +13,7 @@ use std::sync::{
 };
 
 /// Concatenate and print file or object content to STDOUT
+#[allow(clippy::too_many_arguments)]
 pub async fn cat(
     client: &Client,
     path: &str,

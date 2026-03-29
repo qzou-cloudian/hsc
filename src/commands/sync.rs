@@ -29,7 +29,7 @@ pub async fn sync(
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::parse_checksum;
-    let (checksum_mode, checksum_algorithm) = parse_checksum(checksum).map_err(|e| e)?;
+    let (checksum_mode, checksum_algorithm) = parse_checksum(checksum)?;
 
     let source_type = parse_path(source)?;
     let dest_type = parse_path(dest)?;
@@ -152,7 +152,7 @@ async fn sync_local_to_s3(
             if needs_sync {
                 upload_file(
                     client,
-                    path.to_str().unwrap(),
+                    path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", path.display()))?,
                     bucket,
                     &s3_key,
                     checksum_mode.clone(),
@@ -254,7 +254,7 @@ async fn sync_s3_to_local(
                         client,
                         bucket,
                         key,
-                        local_path.to_str().unwrap(),
+                        local_path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", local_path.display()))?,
                         checksum_mode.clone(),
                         sse,
                         #[cfg(feature = "rdma")]
@@ -308,6 +308,7 @@ async fn sync_s3_to_local(
 }
 
 /// Sync S3 to S3
+#[allow(clippy::too_many_arguments)]
 async fn sync_s3_to_s3(
     client: &Client,
     src_bucket: &str,

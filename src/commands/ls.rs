@@ -20,6 +20,9 @@ pub async fn list(
             match path_type {
                 PathType::S3 { bucket, key } => {
                     if versions {
+                        if recursive {
+                            eprintln!("Warning: --recursive is ignored when --versions is specified");
+                        }
                         list_object_versions(client, &bucket, &key, human_readable).await
                     } else {
                         list_objects(client, &bucket, &key, recursive).await

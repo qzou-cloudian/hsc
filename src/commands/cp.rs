@@ -10,11 +10,11 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use walkdir::WalkDir;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 #[cfg(feature = "rdma")]
 use crate::rdma::{RdmaInterceptor, RdmaProvider};
-#[cfg(feature = "rdma")]
-use base64::Engine as _;
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 #[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -596,7 +596,7 @@ async fn upload_file_multipart(
                     .key(key)
                     .upload_id(upload_id)
                     .part_number(part_number)
-                    .body(ByteStream::from(part_data.unwrap()));
+                    .body(ByteStream::from(part_data.ok_or("Internal error: part buffer missing on non-RDMA path")?));
                 if checksum_mode.is_some() {
                     req = req.checksum_algorithm(effective_algo.clone());
                 }
@@ -943,7 +943,7 @@ async fn upload_directory(
 
             upload_file(
                 client,
-                path.to_str().unwrap(),
+                path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", path.display()))?,
                 bucket,
                 &s3_key,
                 None,
@@ -1004,7 +1004,7 @@ async fn download_directory(
                     client,
                     bucket,
                     key,
-                    local_path.to_str().unwrap(),
+                    local_path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", local_path.display()))?,
                     None,
                     sse,
                     #[cfg(feature = "rdma")]
