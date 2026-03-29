@@ -1066,6 +1066,116 @@ done
 wait
 collect_results
 
+# ── Step 8e: SSE-C key validation ────────────────────────────────────────────
+# These tests run unconditionally (independent of HSC_SSE).
+# A fresh random 256-bit key is generated; the test verifies that:
+#   (a) upload with SSE-C key succeeds
+#   (b) download with the correct key succeeds and content is intact
+#   (c) download WITHOUT any SSE-C key fails (server should return 400/403)
+#   (d) download with a WRONG key fails
+step_time
+echo ""
+info "Step 8e: SSE-C key validation tests..."
+_SSEC_KEY=$(openssl rand -base64 32)
+_SSEC_WRONG=$(openssl rand -base64 32)
+_SSEC_OBJ="ssec_validate_test.dat"
+_SSEC_SIZE=65536
+truncate -s $_SSEC_SIZE "$TEST_DIR/$_SSEC_OBJ" 2>/dev/null || dd if=/dev/random of="$TEST_DIR/$_SSEC_OBJ" bs=$_SSEC_SIZE count=1 status=none
+
+# (a) upload with SSE-C key
+if $BINARY cp --sse-c AES256 --sse-c-key "$_SSEC_KEY" \
+        "$TEST_DIR/$_SSEC_OBJ" "s3://$BUCKET_NAME/$_SSEC_OBJ" >/dev/null 2>&1; then
+    success "SSE-C: upload with customer key succeeded"
+else
+    error "SSE-C: upload with customer key failed"
+fi
+
+# (b) download with correct key — must succeed and data must match
+_ssec_dl="$TEST_DIR/${_SSEC_OBJ}_dl"
+if $BINARY cp --sse-c AES256 --sse-c-key "$_SSEC_KEY" \
+        "s3://$BUCKET_NAME/$_SSEC_OBJ" "$_ssec_dl" >/dev/null 2>&1 \
+        && cmp -s "$TEST_DIR/$_SSEC_OBJ" "$_ssec_dl"; then
+    success "SSE-C: download with correct key succeeded and content is intact"
+else
+    error "SSE-C: download with correct key failed or content mismatch"
+fi
+rm -f "$_ssec_dl"
+
+# (c) download WITHOUT SSE-C key — server must reject (non-zero exit)
+if $BINARY cp "s3://$BUCKET_NAME/$_SSEC_OBJ" "$_ssec_dl" >/dev/null 2>&1; then
+    error "SSE-C: download without key unexpectedly succeeded (expected failure)"
+else
+    success "SSE-C: download without key correctly rejected by server"
+fi
+rm -f "$_ssec_dl"
+
+# (d) download with WRONG SSE-C key — server must reject
+if $BINARY cp --sse-c AES256 --sse-c-key "$_SSEC_WRONG" \
+        "s3://$BUCKET_NAME/$_SSEC_OBJ" "$_ssec_dl" >/dev/null 2>&1; then
+    error "SSE-C: download with wrong key unexpectedly succeeded (expected failure)"
+else
+    success "SSE-C: download with wrong key correctly rejected by server"
+fi
+rm -f "$_ssec_dl"
+
+# ── Step 8f: sync --delete and sync --checksum ────────────────────────────────
+step_time
+echo ""
+info "Step 8f: sync --delete and sync --checksum tests..."
+_SYNC_DIR="$TEST_DIR/sync_test"
+_SYNC_PREFIX="sync_test"
+mkdir -p "$_SYNC_DIR"
+
+# Create 3 small files
+truncate -s 4096  "$_SYNC_DIR/sync_a.dat"
+truncate -s 8192  "$_SYNC_DIR/sync_b.dat"
+truncate -s 16384 "$_SYNC_DIR/sync_c.dat"
+
+# Initial sync: upload all 3 files with --checksum
+info "  sync --checksum: uploading 3 files..."
+if $BINARY sync --checksum "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
+    success "sync --checksum: initial sync of 3 files succeeded"
+else
+    error "sync --checksum: initial sync failed"
+fi
+
+# Verify all 3 objects are present
+_sync_count=$($BINARY ls "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>/dev/null | grep -c 'sync_[abc]\.dat' || echo 0)
+if [ "$_sync_count" -eq 3 ]; then
+    success "sync --checksum: all 3 objects present in S3"
+else
+    error "sync --checksum: expected 3 objects, found $_sync_count"
+fi
+
+# Remove one local file and re-sync with --delete
+rm -f "$_SYNC_DIR/sync_b.dat"
+info "  sync --delete: removed sync_b.dat locally, re-syncing..."
+if $BINARY sync --delete "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
+    success "sync --delete: re-sync succeeded"
+else
+    error "sync --delete: re-sync failed"
+fi
+
+# Verify sync_b.dat was deleted from S3
+if $BINARY stat "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_b.dat" >/dev/null 2>&1; then
+    error "sync --delete: sync_b.dat still exists in S3 (should have been deleted)"
+else
+    success "sync --delete: sync_b.dat correctly removed from S3"
+fi
+
+# Verify sync_a.dat and sync_c.dat are still present
+_sync_remaining=$($BINARY ls "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>/dev/null | grep -c 'sync_[ac]\.dat' || echo 0)
+if [ "$_sync_remaining" -eq 2 ]; then
+    success "sync --delete: remaining 2 objects (sync_a, sync_c) intact"
+else
+    error "sync --delete: expected 2 remaining objects, found $_sync_remaining"
+fi
+
+# Cleanup sync test objects
+$BINARY rm "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_a.dat" >/dev/null 2>&1 || true
+$BINARY rm "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_c.dat" >/dev/null 2>&1 || true
+rm -rf "$_SYNC_DIR"
+
 # Step 9: Delete all objects
 step_time
 echo ""
@@ -1177,6 +1287,18 @@ for dst_key in "${EC_COPY_DSTS[@]}"; do
     ) > "$RESULTS_DIR/job_${_JOB}" &
     ((_JOB++))
 done
+
+# Delete SSE-C validation object (Step 8e)
+(
+    echo "INFO:Deleting $_SSEC_OBJ..."
+    if $BINARY rm "s3://$BUCKET_NAME/$_SSEC_OBJ" >/dev/null 2>&1; then
+        echo "PASS:Deleted $_SSEC_OBJ"
+    else
+        echo "INFO:$_SSEC_OBJ already absent or delete skipped"
+    fi
+) > "$RESULTS_DIR/job_${_JOB}" &
+((_JOB++))
+
 wait
 collect_results
 
