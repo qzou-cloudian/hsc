@@ -7,7 +7,7 @@ between GPU memory or system memory and S3 compatible object storage using RDMA.
 
 ## Features
 
-- **11 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`
+- **12 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`, `versions`
 - **RDMA Transfers**: GPU-direct data paths via NVIDIA cuObject — zero-copy between object storage and GPU memory or system memory
 - **Multipart Upload**: Automatic multipart transfers for large files with configurable thresholds
 - **Checksum Validation**: Support for CRC32, CRC32C, SHA1, and SHA256
@@ -64,10 +64,10 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 
 ### Object Operations
 
-- **`cp <source> <dest> [--recursive]`** - Copy files/objects
+- **`cp <source> <dest> [--recursive] [--checksum [ALGO]]`** - Copy files/objects
 - **`mv <source> <dest> [--recursive]`** - Move files/objects
 - **`rm <path> [--recursive]`** - Remove objects
-- **`sync <source> <dest>`** - Synchronize directories (copies only changed files)
+- **`sync <source> <dest> [--checksum [ALGO]] [--delete]`** - Synchronize directories (copies only changed files; `--delete` removes destination entries absent from source)
 
 ### Information Commands
 
@@ -75,6 +75,7 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 - **`diff <source> <dest>`** - Compare directories or buckets
 - **`cat <path> [--range <start-end>]`** - Output file content to stdout
 - **`cmp <path1> <path2> [--range <start-end>]`** - Compare two files or objects byte-by-byte
+- **`versions s3://bucket[/prefix] [--human-readable]`** - List all object versions and delete markers
 
 ## Configuration
 
@@ -155,11 +156,70 @@ hsc sync --include "*.jpg" --include "*.png" ./photos s3://bucket/
 Validate data integrity with checksums:
 
 ```bash
+# Verify S3 object checksums on upload
+hsc cp file.txt s3://bucket/ --checksum CRC32C
+
 # Calculate checksums for local files
 hsc stat myfile.txt --checksum SHA256
 
-# Verify S3 object checksums
-hsc cp file.txt s3://bucket/ --checksum CRC32C
+# Sync with checksum verification
+hsc sync --checksum CRC32 ./local-dir s3://bucket/prefix/
+```
+
+### Sync with Delete
+
+Mirror a source exactly, removing destination entries not present in the source:
+
+```bash
+# Remove S3 objects that no longer exist locally
+hsc sync --delete ./local-dir s3://bucket/prefix/
+
+# Mirror one S3 prefix to another
+hsc sync --delete s3://source-bucket/data/ s3://dest-bucket/data/
+
+# Combine with --checksum for full verification
+hsc sync --delete --checksum SHA256 ./local-dir s3://bucket/prefix/
+```
+
+### Server-Side Encryption
+
+Encrypt objects at rest using S3-managed keys, AWS KMS, or customer-provided keys:
+
+```bash
+# S3-managed AES-256 encryption
+hsc cp file.txt s3://bucket/ --sse AES256
+
+# AWS KMS encryption
+hsc cp file.txt s3://bucket/ --sse aws:kms
+hsc cp file.txt s3://bucket/ --sse aws:kms --sse-kms-key-id arn:aws:kms:us-east-1:123:key/abc
+
+# Customer-provided key (SSE-C) — you manage the 256-bit key
+KEY=$(openssl rand -base64 32)
+hsc cp file.txt s3://bucket/ --sse-c AES256 --sse-c-key "$KEY"
+hsc cp s3://bucket/file.txt ./ --sse-c AES256 --sse-c-key "$KEY"
+
+# SSE-C for S3-to-S3 copy (source and destination may use different keys)
+hsc cp s3://bucket/src.txt s3://bucket/dst.txt \
+    --sse-c-copy-source AES256 --sse-c-copy-source-key "$SRC_KEY" \
+    --sse-c AES256 --sse-c-key "$DST_KEY"
+
+# All encryption options work with sync and mv too
+hsc sync --sse AES256 ./local-dir s3://bucket/prefix/
+```
+
+### Object Versions
+
+List all versions and delete markers for versioned buckets:
+
+```bash
+# List all versions in a bucket
+hsc versions s3://my-bucket
+
+# List versions for a specific key
+hsc versions s3://my-bucket/path/to/file.txt
+
+# Human-readable sizes
+hsc versions --human-readable s3://my-bucket/prefix/
 ```
 
 ### Range Reads
@@ -293,7 +353,7 @@ hsc cp s3://bucket/large-file.zip ./ --checksum
 ### Mirror S3 bucket
 
 ```bash
-hsc sync s3://source-bucket/ s3://dest-bucket/
+hsc sync --delete s3://source-bucket/ s3://dest-bucket/
 ```
 
 ### Find differences between environments
