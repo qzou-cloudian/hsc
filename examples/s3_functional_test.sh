@@ -1126,10 +1126,10 @@ _SYNC_DIR="$TEST_DIR/sync_test"
 _SYNC_PREFIX="sync_test"
 mkdir -p "$_SYNC_DIR"
 
-# Create 3 small files
-truncate -s 4096  "$_SYNC_DIR/sync_a.dat"
-truncate -s 8192  "$_SYNC_DIR/sync_b.dat"
-truncate -s 16384 "$_SYNC_DIR/sync_c.dat"
+# Create 3 small files with random content
+dd if=/dev/random of="$_SYNC_DIR/sync_a.dat" bs=4096  count=1 status=none
+dd if=/dev/random of="$_SYNC_DIR/sync_b.dat" bs=8192  count=1 status=none
+dd if=/dev/random of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 status=none
 
 # Initial sync: upload all 3 files with --checksum
 info "  sync --checksum: uploading 3 files..."
@@ -1175,6 +1175,97 @@ fi
 $BINARY rm "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_a.dat" >/dev/null 2>&1 || true
 $BINARY rm "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_c.dat" >/dev/null 2>&1 || true
 rm -rf "$_SYNC_DIR"
+
+# ── Step 8g: mv, diff, cat, and ls --versions ─────────────────────────────────
+step_time
+echo ""
+info "Step 8g: mv / diff / cat / ls --versions..."
+mkdir -p "$TEST_DIR/mv_verify" "$TEST_DIR/diff_src" "$TEST_DIR/cat_verify"
+
+# ── mv: rename a small S3 object ──────────────────────────────────────────────
+_MV_SRC="testfile_64k.dat"
+_MV_DST="mv_renamed_64k.dat"
+info "  mv: s3 rename $BUCKET_NAME/$_MV_SRC → $_MV_DST"
+if $BINARY mv $SSE_COPY_ARGS \
+        "s3://$BUCKET_NAME/$_MV_SRC" "s3://$BUCKET_NAME/$_MV_DST" >/dev/null 2>&1; then
+    success "mv: object renamed successfully"
+    # source must be gone
+    if $BINARY stat "s3://$BUCKET_NAME/$_MV_SRC" >/dev/null 2>&1; then
+        error "mv: source object still exists after mv"
+    else
+        success "mv: source object correctly removed"
+    fi
+    # destination must be reachable and correct size
+    _mv_dl="$TEST_DIR/mv_verify/$_MV_DST"
+    if $BINARY cp $SSE_DOWNLOAD_ARGS \
+            "s3://$BUCKET_NAME/$_MV_DST" "$_mv_dl" >/dev/null 2>&1 \
+            && [ "$(stat -c%s "$_mv_dl")" -eq 65536 ]; then
+        success "mv: destination object download and size verified (65536 bytes)"
+    else
+        error "mv: destination download or size check failed"
+    fi
+else
+    error "mv: rename failed"
+fi
+
+# ── diff: compare local dir to S3 prefix ──────────────────────────────────────
+# Populate diff_src with two files, upload them, then diff — expect no differences.
+dd if=/dev/random of="$TEST_DIR/diff_src/diff_a.dat" bs=4096  count=1 status=none
+dd if=/dev/random of="$TEST_DIR/diff_src/diff_b.dat" bs=8192  count=1 status=none
+$BINARY cp $SSE_UPLOAD_ARGS \
+    "$TEST_DIR/diff_src/diff_a.dat" "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1
+$BINARY cp $SSE_UPLOAD_ARGS \
+    "$TEST_DIR/diff_src/diff_b.dat" "s3://$BUCKET_NAME/diff_src/diff_b.dat" >/dev/null 2>&1
+info "  diff: comparing local dir to S3 prefix (expect no differences)..."
+_diff_out=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
+if echo "$_diff_out" | grep -qiE 'only in|differ|mismatch'; then
+    error "diff: unexpected differences reported: $_diff_out"
+else
+    success "diff: no differences between local dir and S3 prefix"
+fi
+# Introduce a size difference — modify one file locally, expect diff to report it
+dd if=/dev/random of="$TEST_DIR/diff_src/diff_extra.dat" bs=1024 count=1 status=none
+_diff_out2=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
+if echo "$_diff_out2" | grep -qiE 'only in.*diff_extra|diff_extra.*only'; then
+    success "diff: correctly detected file present locally but not in S3"
+else
+    error "diff: failed to detect extra local file (got: $_diff_out2)"
+fi
+
+# ── cat: read byte ranges from an S3 object ───────────────────────────────────
+info "  cat: byte-range reads from testfile_1m.dat..."
+_cat_file="$TEST_DIR/cat_verify/range.bin"
+# First 1 KB
+if $BINARY cat "s3://$BUCKET_NAME/testfile_1m.dat" --offset 0 --size 1024 \
+        > "$_cat_file" 2>/dev/null && [ "$(stat -c%s "$_cat_file")" -eq 1024 ]; then
+    success "cat: --offset 0 --size 1024 returned 1024 bytes"
+else
+    error "cat: --offset 0 --size 1024 failed or wrong size"
+fi
+# Middle range via --range
+if $BINARY cat "s3://$BUCKET_NAME/testfile_1m.dat" --range 512000-513023 \
+        > "$_cat_file" 2>/dev/null && [ "$(stat -c%s "$_cat_file")" -eq 1024 ]; then
+    success "cat: --range 512000-513023 returned 1024 bytes"
+else
+    error "cat: --range 512000-513023 failed or wrong size"
+fi
+
+# ── ls --versions: basic smoke test (no versioning required) ──────────────────
+info "  ls --versions: smoke test (header line present)..."
+_ver_out=$($BINARY ls --versions "s3://$BUCKET_NAME/" 2>/dev/null | head -5)
+if echo "$_ver_out" | grep -q 'VERSION-ID'; then
+    success "ls --versions: header line present"
+else
+    error "ls --versions: missing header line (got: $_ver_out)"
+fi
+
+# Cleanup
+$BINARY rm "s3://$BUCKET_NAME/$_MV_DST"            >/dev/null 2>&1 || true
+$BINARY rm "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1 || true
+$BINARY rm "s3://$BUCKET_NAME/diff_src/diff_b.dat" >/dev/null 2>&1 || true
+# Restore the mv'd object so Step 9 can delete it cleanly
+$BINARY cp $SSE_UPLOAD_ARGS \
+    "$TEST_DIR/testfile_64k.dat" "s3://$BUCKET_NAME/$_MV_SRC" >/dev/null 2>&1 || true
 
 # Step 9: Delete all objects
 step_time
