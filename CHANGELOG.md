@@ -4,15 +4,17 @@ All notable changes to hsc will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-03-29
+
 ### Added
 - `ls --versions` flag: list all object versions and delete markers for a bucket or key prefix
   - Paginates automatically through large version histories
   - Output columns: KEY, VERSION-ID, LATEST, TYPE, LAST-MODIFIED, SIZE
   - `--human-readable` flag formats sizes as KB/MB/GB
-- `--checksum` option for `sync`: thread checksum mode/algorithm through to upload and
+- `sync --checksum`: thread checksum mode/algorithm through to upload and
   download calls, matching the existing `cp --checksum` behaviour
   (accepted values: `ENABLED`, `CRC32`, `CRC32C`, `SHA1`, `SHA256`; bare flag = `ENABLED`)
-- `--delete` option for `sync`: remove destination entries not present in source
+- `sync --delete`: remove destination entries not present in source
   - local→S3: deletes S3 objects absent from the local source tree
   - S3→local: deletes local files absent from the S3 source prefix
   - S3→S3: deletes destination objects absent from the source prefix
@@ -32,14 +34,17 @@ All notable changes to hsc will be documented in this file.
 - `examples/s3_functional_test.sh` improvements:
   - `HSC_SSE` env var (`AES256`, `aws:kms`, `sse-c`) to run all tests with encryption
   - `HSC_SSE_KMS_KEY_ID` and `HSC_SSE_C_KEY` companion variables
-  - Step 8e: SSE-C key validation — verifies correct key succeeds, missing/wrong key rejected
+  - Step 8e: SSE-C key validation — correct key succeeds; missing or wrong key rejected
   - Step 8f: `sync --delete` and `sync --checksum` functional tests
+  - Step 8g: `mv`, `diff`, `cat`, and `ls --versions` functional tests
   - Optional bucket argument — skips `mb`/`rb` when a pre-existing bucket is supplied
   - EC stripe boundary tests (Steps 8a–8d) for 3-replica / EC 2+1 / EC 4+2 storage policies
+  - Numbered failed-test summary at end of run with rerun commands written to `rerun_failed.sh`
 
 ### Fixed
 - Empty bucket check in `examples/s3_functional_test.sh`: replaced `wc -l` with
   `grep -c "^[0-9]"` to avoid false positives from the `ls` summary footer line
+- Sync test files now use `/dev/random` for content, consistent with all other test files
 
 ## [0.1.0] - 2026-02-25
 
