@@ -1,8 +1,9 @@
 use crate::commands::cp::SseConfig;
 use crate::filters::FileFilter;
 use crate::path_utils::{join_s3_key, parse_path, PathType};
+use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode};
 use aws_sdk_s3::Client;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::fs;
 use walkdir::WalkDir;
@@ -20,11 +21,16 @@ pub async fn sync(
     dest: &str,
     include: Vec<String>,
     exclude: Vec<String>,
+    checksum: Option<String>,
+    delete: bool,
     sse: SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::commands::cp::parse_checksum;
+    let (checksum_mode, checksum_algorithm) = parse_checksum(checksum).map_err(|e| e)?;
+
     let source_type = parse_path(source)?;
     let dest_type = parse_path(dest)?;
     let filter = FileFilter::new(include, exclude)?;
@@ -37,6 +43,9 @@ pub async fn sync(
                 bucket,
                 key,
                 &filter,
+                checksum_mode,
+                checksum_algorithm,
+                delete,
                 &sse,
                 multipart_threshold,
                 multipart_chunksize,
@@ -52,6 +61,8 @@ pub async fn sync(
                 key,
                 dst,
                 &filter,
+                checksum_mode,
+                delete,
                 &sse,
                 #[cfg(feature = "rdma")]
                 rdma,
@@ -67,7 +78,19 @@ pub async fn sync(
                 bucket: dst_bucket,
                 key: dst_key,
             },
-        ) => sync_s3_to_s3(client, src_bucket, src_key, dst_bucket, dst_key, &filter, &sse).await,
+        ) => {
+            sync_s3_to_s3(
+                client,
+                src_bucket,
+                src_key,
+                dst_bucket,
+                dst_key,
+                &filter,
+                delete,
+                &sse,
+            )
+            .await
+        }
         (PathType::Local(_), PathType::Local(_)) => {
             Err("Local to local sync not implemented. Use standard 'rsync' command.".into())
         }
@@ -82,6 +105,9 @@ async fn sync_local_to_s3(
     bucket: &str,
     s3_prefix: &str,
     filter: &FileFilter,
+    checksum_mode: Option<ChecksumMode>,
+    checksum_algorithm: Option<ChecksumAlgorithm>,
+    delete: bool,
     sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
@@ -95,6 +121,7 @@ async fn sync_local_to_s3(
     let base_path = Path::new(local_dir);
     let mut synced_count = 0;
     let mut skipped_count = 0;
+    let mut local_keys: HashSet<String> = HashSet::new();
 
     for entry in WalkDir::new(local_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -111,6 +138,7 @@ async fn sync_local_to_s3(
             }
 
             let s3_key = join_s3_key(s3_prefix, &relative_str.replace("\\", "/"));
+            local_keys.insert(s3_key.clone());
 
             // Check if file needs to be synced
             let needs_sync = match s3_objects.get(&s3_key) {
@@ -127,8 +155,8 @@ async fn sync_local_to_s3(
                     path.to_str().unwrap(),
                     bucket,
                     &s3_key,
-                    None,
-                    None,
+                    checksum_mode.clone(),
+                    checksum_algorithm.clone(),
                     sse,
                     multipart_threshold,
                     multipart_chunksize,
@@ -143,6 +171,20 @@ async fn sync_local_to_s3(
         }
     }
 
+    if delete {
+        let mut deleted_count = 0;
+        for s3_key in s3_objects.keys() {
+            if !local_keys.contains(s3_key) {
+                client.delete_object().bucket(bucket).key(s3_key).send().await?;
+                println!("Deleted: s3://{}/{}", bucket, s3_key);
+                deleted_count += 1;
+            }
+        }
+        if deleted_count > 0 {
+            println!("Deleted {} object(s) not present in source", deleted_count);
+        }
+    }
+
     println!(
         "\nSync complete: {} uploaded, {} skipped (unchanged)",
         synced_count, skipped_count
@@ -151,12 +193,15 @@ async fn sync_local_to_s3(
 }
 
 /// Sync S3 to local directory
+#[allow(clippy::too_many_arguments)]
 async fn sync_s3_to_local(
     client: &Client,
     bucket: &str,
     prefix: &str,
     local_dir: &str,
     filter: &FileFilter,
+    checksum_mode: Option<ChecksumMode>,
+    delete: bool,
     sse: &SseConfig,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -165,6 +210,7 @@ async fn sync_s3_to_local(
     let mut continuation_token: Option<String> = None;
     let mut synced_count = 0;
     let mut skipped_count = 0;
+    let mut s3_relative_keys: HashSet<String> = HashSet::new();
 
     loop {
         let mut request = client.list_objects_v2().bucket(bucket);
@@ -191,6 +237,8 @@ async fn sync_s3_to_local(
                     key
                 };
 
+                s3_relative_keys.insert(relative_key.to_string());
+
                 let local_path = Path::new(local_dir).join(relative_key);
 
                 let needs_sync = if local_path.exists() {
@@ -207,7 +255,7 @@ async fn sync_s3_to_local(
                         bucket,
                         key,
                         local_path.to_str().unwrap(),
-                        None,
+                        checksum_mode.clone(),
                         sse,
                         #[cfg(feature = "rdma")]
                         rdma.as_ref().map(Arc::clone),
@@ -227,6 +275,31 @@ async fn sync_s3_to_local(
         }
     }
 
+    if delete {
+        let mut deleted_count = 0;
+        for entry in WalkDir::new(local_dir).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let relative = match path.strip_prefix(Path::new(local_dir)) {
+                Ok(r) => r.to_string_lossy().replace('\\', "/"),
+                Err(_) => continue,
+            };
+            if !filter.matches(&relative) {
+                continue;
+            }
+            if !s3_relative_keys.contains(&relative) {
+                fs::remove_file(path).await?;
+                println!("Deleted: {}", path.display());
+                deleted_count += 1;
+            }
+        }
+        if deleted_count > 0 {
+            println!("Deleted {} local file(s) not present in source", deleted_count);
+        }
+    }
+
     println!(
         "\nSync complete: {} downloaded, {} skipped (unchanged)",
         synced_count, skipped_count
@@ -242,6 +315,7 @@ async fn sync_s3_to_s3(
     dst_bucket: &str,
     dst_prefix: &str,
     filter: &FileFilter,
+    delete: bool,
     sse: &SseConfig,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::copy_s3_to_s3;
@@ -252,6 +326,7 @@ async fn sync_s3_to_s3(
     let mut continuation_token: Option<String> = None;
     let mut synced_count = 0;
     let mut skipped_count = 0;
+    let mut expected_dst_keys: HashSet<String> = HashSet::new();
 
     loop {
         let mut request = client.list_objects_v2().bucket(src_bucket);
@@ -280,6 +355,7 @@ async fn sync_s3_to_s3(
                 };
 
                 let dst_key = join_s3_key(dst_prefix, relative_key);
+                expected_dst_keys.insert(dst_key.clone());
 
                 // Check if object needs to be synced
                 let needs_sync = match dst_objects.get(&dst_key) {
@@ -303,6 +379,20 @@ async fn sync_s3_to_s3(
             continuation_token = response.next_continuation_token().map(|s| s.to_string());
         } else {
             break;
+        }
+    }
+
+    if delete {
+        let mut deleted_count = 0;
+        for dst_key in dst_objects.keys() {
+            if !expected_dst_keys.contains(dst_key) {
+                client.delete_object().bucket(dst_bucket).key(dst_key).send().await?;
+                println!("Deleted: s3://{}/{}", dst_bucket, dst_key);
+                deleted_count += 1;
+            }
+        }
+        if deleted_count > 0 {
+            println!("Deleted {} object(s) not present in source", deleted_count);
         }
     }
 

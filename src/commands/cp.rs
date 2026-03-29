@@ -106,7 +106,7 @@ pub async fn copy(
 }
 
 /// Parse checksum option into (mode, algorithm) pair
-fn parse_checksum(
+pub(crate) fn parse_checksum(
     checksum: Option<String>,
 ) -> Result<(Option<ChecksumMode>, Option<ChecksumAlgorithm>), String> {
     let Some(val) = checksum else {

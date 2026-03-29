@@ -134,6 +134,12 @@ enum Commands {
         /// Exclude files matching pattern (can be specified multiple times)
         #[arg(long)]
         exclude: Vec<String>,
+        /// Checksum algorithm (ENABLED, CRC32, CRC32C, SHA1, SHA256); bare --checksum enables verification
+        #[arg(long, num_args = 0..=1, default_missing_value = "ENABLED")]
+        checksum: Option<String>,
+        /// Delete destination objects/files that are not present in the source
+        #[arg(long)]
+        delete: bool,
         /// Server-side encryption algorithm for destination (AES256, aws:kms, aws:kms:dsse)
         #[arg(long, value_name = "ALGORITHM")]
         sse: Option<String>,
@@ -381,6 +387,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             dest,
             include,
             exclude,
+            checksum,
+            delete,
             sse,
             sse_kms_key_id,
             sse_c,
@@ -402,6 +410,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &dest,
                 include,
                 exclude,
+                checksum,
+                delete,
                 sse_config,
                 client_config_clone.multipart_threshold,
                 client_config_clone.multipart_chunksize,
