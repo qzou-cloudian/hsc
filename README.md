@@ -7,7 +7,7 @@ between GPU memory or system memory and S3 compatible object storage using RDMA.
 
 ## Features
 
-- **12 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`, `versions`
+- **12 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`
 - **RDMA Transfers**: GPU-direct data paths via NVIDIA cuObject — zero-copy between object storage and GPU memory or system memory
 - **Multipart Upload**: Automatic multipart transfers for large files with configurable thresholds
 - **Checksum Validation**: Support for CRC32, CRC32C, SHA1, and SHA256
@@ -60,7 +60,7 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 
 - **`mb s3://bucket [--ignore-existing]`** - Create a new bucket
 - **`rb s3://bucket [--force]`** - Remove bucket (use --force to delete all objects)
-- **`ls [s3://bucket[/prefix]] [--recursive]`** - List buckets or objects
+- **`ls [s3://bucket[/prefix]] [--recursive] [--versions] [--human-readable]`** - List buckets or objects; `--versions` lists all object versions and delete markers
 
 ### Object Operations
 
@@ -213,13 +213,13 @@ List all versions and delete markers for versioned buckets:
 
 ```bash
 # List all versions in a bucket
-hsc versions s3://my-bucket
+hsc ls --versions s3://my-bucket
 
-# List versions for a specific key
-hsc versions s3://my-bucket/path/to/file.txt
+# List versions for a specific key prefix
+hsc ls --versions s3://my-bucket/path/to/
 
 # Human-readable sizes
-hsc versions --human-readable s3://my-bucket/prefix/
+hsc ls --versions --human-readable s3://my-bucket/prefix/
 ```
 
 ### Range Reads

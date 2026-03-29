@@ -84,6 +84,12 @@ enum Commands {
         /// List all objects recursively
         #[arg(long)]
         recursive: bool,
+        /// List all object versions and delete markers (versioned buckets only)
+        #[arg(long)]
+        versions: bool,
+        /// Format sizes in human-readable units (KB, MB, GB); used with --versions
+        #[arg(long)]
+        human_readable: bool,
     },
     /// Copy files
     Cp {
@@ -254,14 +260,6 @@ enum Commands {
         #[arg(long)]
         version_id: Option<String>,
     },
-    /// List object versions in an S3 bucket or for a specific key
-    Versions {
-        /// S3 URI (s3://bucket[/prefix])
-        path: String,
-        /// Format sizes in human-readable units (KB, MB, GB)
-        #[arg(long)]
-        human_readable: bool,
-    },
     /// Compare two files or objects byte-by-byte
     Cmp {
         /// First path (local path or s3://bucket/key)
@@ -351,7 +349,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Rb { bucket, force } => {
             commands::rb::remove_bucket(&client, &bucket, force).await
         }
-        Commands::Ls { path, recursive } => commands::ls::list(&client, path, recursive).await,
+        Commands::Ls { path, recursive, versions, human_readable } => {
+            commands::ls::list(&client, path, recursive, versions, human_readable).await
+        }
         Commands::Cp {
             source,
             dest,
@@ -502,9 +502,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 rdma_provider,
             )
             .await
-        }
-        Commands::Versions { path, human_readable } => {
-            commands::versions::list_versions(&client, &path, human_readable).await
         }
         Commands::Cmp {
             path1,

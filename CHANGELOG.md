@@ -5,7 +5,7 @@ All notable changes to hsc will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- `versions` command: list all object versions and delete markers for a bucket or key prefix
+- `ls --versions` flag: list all object versions and delete markers for a bucket or key prefix
   - Paginates automatically through large version histories
   - Output columns: KEY, VERSION-ID, LATEST, TYPE, LAST-MODIFIED, SIZE
   - `--human-readable` flag formats sizes as KB/MB/GB
