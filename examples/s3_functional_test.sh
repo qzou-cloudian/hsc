@@ -11,6 +11,24 @@ if [[ -n "$HSC_RDMA" && "$HSC_RDMA" != "false" && "$HSC_RDMA" != "0" ]]; then
     if [[ "$HSC_RDMA" == "cuobj" || "$HSC_RDMA" == "auto" ]]; then
         echo "HSC_RDMA=$HSC_RDMA detected — building with --features cuobj ..."
         cargo build --features cuobj 2>&1 | tail -3
+
+        # Build libs3_rdma_cuobj.so and copy it next to the hsc binary so that
+        # the runtime loader finds it via the "exe dir" search path.
+        _CUOBJ_SRC="${CUOBJ_SRC:-$(cd "$(dirname "$0")/../.." && pwd)/s3-rdma/providers/cuobj}"
+        if [[ -d "$_CUOBJ_SRC" ]]; then
+            echo "Building libs3_rdma_cuobj.so from $_CUOBJ_SRC ..."
+            CUOBJ_ROOT_DIR="${CUOBJ_ROOT_DIR:-/usr/local/cuda}" \
+                cargo build --manifest-path "$_CUOBJ_SRC/Cargo.toml" 2>&1 | tail -3
+            _SO="$_CUOBJ_SRC/target/debug/libs3_rdma_cuobj.so"
+            if [[ -f "$_SO" ]]; then
+                cp "$_SO" "./target/debug/"
+                echo "Copied libs3_rdma_cuobj.so → ./target/debug/"
+            else
+                echo "Warning: libs3_rdma_cuobj.so not produced — RDMA may fall back to standard I/O"
+            fi
+        else
+            echo "Warning: cuobj source not found at $_CUOBJ_SRC — skipping libs3_rdma_cuobj.so build"
+        fi
     else
         echo "HSC_RDMA=$HSC_RDMA detected — building with --features rdma ..."
         cargo build --features rdma 2>&1 | tail -3
