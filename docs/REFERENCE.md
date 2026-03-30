@@ -91,6 +91,8 @@ hsc cp <source> <dest> [options]
 - `--include <pattern>` - Include only files matching pattern (can be repeated)
 - `--exclude <pattern>` - Exclude files matching pattern (can be repeated)
 - `--checksum [<alg>]` - Enable checksum for single file operations; optionally specify algorithm (CRC32, CRC32C, SHA1, SHA256); bare `--checksum` defaults to CRC32
+- `--disable-multipart` - Always use a single PUT regardless of file size (max 5 GiB per object)
+- `--part-size <SIZE>` - Set multipart threshold and chunk size (e.g. `16m`, `256m`, `1g`); conflicts with `--disable-multipart`
 
 **Examples:**
 ```bash
@@ -99,6 +101,8 @@ hsc cp s3://bucket/file.txt ./                  # Download file
 hsc cp --recursive ./dir s3://bucket/prefix/    # Upload directory
 hsc cp --include "*.jpg" ./photos s3://bucket/  # Upload only .jpg files
 hsc cp file.txt s3://bucket/ --checksum SHA256
+hsc cp large.bin s3://bucket/ --part-size 64m   # Use 64 MiB parts
+hsc cp small.txt s3://bucket/ --disable-multipart  # Force single PUT
 ```
 
 ### mv - Move
@@ -113,11 +117,14 @@ hsc mv <source> <dest> [options]
 - `--recursive` - Move directories recursively
 - `--include <pattern>` - Include only files matching pattern
 - `--exclude <pattern>` - Exclude files matching pattern
+- `--disable-multipart` - Always use a single PUT regardless of file size (max 5 GiB per object)
+- `--part-size <SIZE>` - Set multipart threshold and chunk size (e.g. `16m`, `256m`, `1g`); conflicts with `--disable-multipart`
 
 **Examples:**
 ```bash
 hsc mv file.txt s3://bucket/newname.txt
 hsc mv s3://bucket/old/ s3://bucket/new/ --recursive
+hsc mv large.bin s3://bucket/large.bin --part-size 64m
 ```
 
 ### rm - Remove
@@ -151,6 +158,10 @@ hsc sync <source> <dest> [options]
 **Options:**
 - `--include <pattern>` - Include only files matching pattern
 - `--exclude <pattern>` - Exclude files matching pattern
+- `--checksum [<alg>]` - Verify checksums during sync (CRC32, CRC32C, SHA1, SHA256)
+- `--delete` - Delete destination objects/files not present in the source
+- `--disable-multipart` - Always use a single PUT regardless of file size (max 5 GiB per object)
+- `--part-size <SIZE>` - Set multipart threshold and chunk size (e.g. `16m`, `256m`, `1g`); conflicts with `--disable-multipart`
 
 **Behavior:**
 - Compares file sizes
@@ -162,6 +173,8 @@ hsc sync <source> <dest> [options]
 hsc sync ./local-dir s3://bucket/backup/        # Backup local to S3
 hsc sync s3://bucket/data/ ./local-cache/       # Download updates
 hsc sync --exclude "*.tmp" ./project s3://backup/
+hsc sync --part-size 32m ./large-data/ s3://bucket/  # 32 MiB parts
+hsc sync --disable-multipart ./small-files/ s3://bucket/  # Force single PUT
 ```
 
 ### stat - Statistics
@@ -312,7 +325,17 @@ temp*           # Files starting with "temp"
 
 ## Multipart Upload
 
-Configured in `~/.aws/config`:
+CLI flags override config-file settings:
+
+| Flag | Effect |
+|---|---|
+| `--disable-multipart` | Always use single PUT; never split into parts (max 5 GiB) |
+| `--part-size <SIZE>` | Use multipart for files ≥ SIZE; split into SIZE-byte parts |
+
+`--disable-multipart` and `--part-size` are mutually exclusive.
+Accepted size suffixes: `k`/`K` (KiB), `m`/`M` (MiB), `g`/`G` (GiB), or plain bytes.
+
+When neither flag is given, values come from `~/.aws/config`:
 
 ```ini
 [s3]

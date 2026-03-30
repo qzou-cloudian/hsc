@@ -64,10 +64,10 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 
 ### Object Operations
 
-- **`cp <source> <dest> [--recursive] [--checksum [ALGO]]`** - Copy files/objects
-- **`mv <source> <dest> [--recursive]`** - Move files/objects
+- **`cp <source> <dest> [--recursive] [--checksum [ALGO]] [--disable-multipart] [--part-size SIZE]`** - Copy files/objects
+- **`mv <source> <dest> [--recursive] [--disable-multipart] [--part-size SIZE]`** - Move files/objects
 - **`rm <path> [--recursive]`** - Remove objects
-- **`sync <source> <dest> [--checksum [ALGO]] [--delete]`** - Synchronize directories (copies only changed files; `--delete` removes destination entries absent from source)
+- **`sync <source> <dest> [--checksum [ALGO]] [--delete] [--disable-multipart] [--part-size SIZE]`** - Synchronize directories (copies only changed files; `--delete` removes destination entries absent from source)
 
 ### Information Commands
 
@@ -96,7 +96,18 @@ region = us-east-1
 
 ### Multipart Upload Settings
 
-Configure automatic multipart uploads in `~/.aws/config`:
+Use CLI flags to control multipart uploads per-command (overrides config file):
+
+```bash
+hsc cp large.bin s3://bucket/ --part-size 64m        # 64 MiB parts
+hsc cp small.txt s3://bucket/ --disable-multipart    # Force single PUT
+hsc sync --part-size 32m ./data/ s3://bucket/
+```
+
+`--part-size` sets both the threshold and chunk size. `--disable-multipart` forces
+a single PUT for all files (max 5 GiB). The two flags are mutually exclusive.
+
+Or configure defaults in `~/.aws/config`:
 
 ```ini
 [s3]
