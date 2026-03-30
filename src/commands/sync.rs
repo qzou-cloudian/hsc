@@ -80,14 +80,7 @@ pub async fn sync(
             },
         ) => {
             sync_s3_to_s3(
-                client,
-                src_bucket,
-                src_key,
-                dst_bucket,
-                dst_key,
-                &filter,
-                delete,
-                &sse,
+                client, src_bucket, src_key, dst_bucket, dst_key, &filter, delete, &sse,
             )
             .await
         }
@@ -152,7 +145,9 @@ async fn sync_local_to_s3(
             if needs_sync {
                 upload_file(
                     client,
-                    path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", path.display()))?,
+                    path.to_str().ok_or_else(|| {
+                        format!("path contains invalid UTF-8: {}", path.display())
+                    })?,
                     bucket,
                     &s3_key,
                     checksum_mode.clone(),
@@ -175,7 +170,12 @@ async fn sync_local_to_s3(
         let mut deleted_count = 0;
         for s3_key in s3_objects.keys() {
             if !local_keys.contains(s3_key) {
-                client.delete_object().bucket(bucket).key(s3_key).send().await?;
+                client
+                    .delete_object()
+                    .bucket(bucket)
+                    .key(s3_key)
+                    .send()
+                    .await?;
                 println!("Deleted: s3://{}/{}", bucket, s3_key);
                 deleted_count += 1;
             }
@@ -254,7 +254,9 @@ async fn sync_s3_to_local(
                         client,
                         bucket,
                         key,
-                        local_path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", local_path.display()))?,
+                        local_path.to_str().ok_or_else(|| {
+                            format!("path contains invalid UTF-8: {}", local_path.display())
+                        })?,
                         checksum_mode.clone(),
                         sse,
                         #[cfg(feature = "rdma")]
@@ -296,7 +298,10 @@ async fn sync_s3_to_local(
             }
         }
         if deleted_count > 0 {
-            println!("Deleted {} local file(s) not present in source", deleted_count);
+            println!(
+                "Deleted {} local file(s) not present in source",
+                deleted_count
+            );
         }
     }
 
@@ -387,7 +392,12 @@ async fn sync_s3_to_s3(
         let mut deleted_count = 0;
         for dst_key in dst_objects.keys() {
             if !expected_dst_keys.contains(dst_key) {
-                client.delete_object().bucket(dst_bucket).key(dst_key).send().await?;
+                client
+                    .delete_object()
+                    .bucket(dst_bucket)
+                    .key(dst_key)
+                    .send()
+                    .await?;
                 println!("Deleted: s3://{}/{}", dst_bucket, dst_key);
                 deleted_count += 1;
             }

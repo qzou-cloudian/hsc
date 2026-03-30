@@ -436,7 +436,13 @@ async fn stat_local_recursive(
         let entry_path = entry.path();
 
         if entry_path.is_file() {
-            stat_local(entry_path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", entry_path.display()))?, checksum.clone()).await?;
+            stat_local(
+                entry_path.to_str().ok_or_else(|| {
+                    format!("path contains invalid UTF-8: {}", entry_path.display())
+                })?,
+                checksum.clone(),
+            )
+            .await?;
             println!(); // Blank line between entries
         }
     }

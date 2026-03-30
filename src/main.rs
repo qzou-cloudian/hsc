@@ -413,9 +413,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Rb { bucket, force } => {
             commands::rb::remove_bucket(&client, &bucket, force).await
         }
-        Commands::Ls { path, recursive, versions, human_readable } => {
-            commands::ls::list(&client, path, recursive, versions, human_readable).await
-        }
+        Commands::Ls {
+            path,
+            recursive,
+            versions,
+            human_readable,
+        } => commands::ls::list(&client, path, recursive, versions, human_readable).await,
         Commands::Cp {
             source,
             dest,
@@ -440,7 +443,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
-            let (threshold, chunksize) = resolve_multipart(disable_multipart, part_size, client_config_clone.multipart_threshold, client_config_clone.multipart_chunksize)?;
+            let (threshold, chunksize) = resolve_multipart(
+                disable_multipart,
+                part_size,
+                client_config_clone.multipart_threshold,
+                client_config_clone.multipart_chunksize,
+            )?;
             commands::cp::copy(
                 &client,
                 &source,
@@ -481,7 +489,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
-            let (threshold, chunksize) = resolve_multipart(disable_multipart, part_size, client_config_clone.multipart_threshold, client_config_clone.multipart_chunksize)?;
+            let (threshold, chunksize) = resolve_multipart(
+                disable_multipart,
+                part_size,
+                client_config_clone.multipart_threshold,
+                client_config_clone.multipart_chunksize,
+            )?;
             commands::sync::sync(
                 &client,
                 &source,
@@ -521,7 +534,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
-            let (threshold, chunksize) = resolve_multipart(disable_multipart, part_size, client_config_clone.multipart_threshold, client_config_clone.multipart_chunksize)?;
+            let (threshold, chunksize) = resolve_multipart(
+                disable_multipart,
+                part_size,
+                client_config_clone.multipart_threshold,
+                client_config_clone.multipart_chunksize,
+            )?;
             commands::mv::move_files(
                 &client,
                 &source,

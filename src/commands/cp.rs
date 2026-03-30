@@ -233,8 +233,6 @@ fn compute_put_checksum(
     (Some(name.to_string()), Some(encoded))
 }
 
-
-
 /// Upload a file to S3
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_file(
@@ -355,16 +353,12 @@ pub async fn upload_file(
             let (algo_name, cksum_val) =
                 compute_put_checksum(&bytes, checksum_mode.as_ref(), checksum_algorithm.as_ref());
             body = ByteStream::from(bytes);
-            request = client
-                .put_object()
-                .bucket(bucket)
-                .key(key)
-                .body(body);
+            request = client.put_object().bucket(bucket).key(key).body(body);
             match (algo_name.as_deref(), cksum_val) {
-                (Some("CRC32"), Some(v))   => request = request.checksum_crc32(v),
-                (Some("CRC32C"), Some(v))  => request = request.checksum_crc32_c(v),
-                (Some("SHA1"), Some(v))    => request = request.checksum_sha1(v),
-                (Some("SHA256"), Some(v))  => request = request.checksum_sha256(v),
+                (Some("CRC32"), Some(v)) => request = request.checksum_crc32(v),
+                (Some("CRC32C"), Some(v)) => request = request.checksum_crc32_c(v),
+                (Some("SHA1"), Some(v)) => request = request.checksum_sha1(v),
+                (Some("SHA256"), Some(v)) => request = request.checksum_sha256(v),
                 _ => {}
             }
         } else {
@@ -382,7 +376,9 @@ pub async fn upload_file(
             request = request.sse_customer_algorithm(algo);
             if let Some(ref key) = sse.sse_c_key {
                 let md5 = sse_c_key_md5(key)?;
-                request = request.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+                request = request
+                    .sse_customer_key(key.clone())
+                    .sse_customer_key_md5(md5);
             }
         }
         request.send().await?;
@@ -415,10 +411,7 @@ async fn upload_file_multipart(
         .unwrap_or(ChecksumAlgorithm::Crc32);
 
     // Step 1: Create multipart upload
-    let mut create_req = client
-        .create_multipart_upload()
-        .bucket(bucket)
-        .key(key);
+    let mut create_req = client.create_multipart_upload().bucket(bucket).key(key);
     if checksum_mode.is_some() {
         create_req = create_req.checksum_algorithm(effective_algo.clone());
     }
@@ -433,7 +426,9 @@ async fn upload_file_multipart(
         create_req = create_req.sse_customer_algorithm(algo);
         if let Some(ref key) = sse.sse_c_key {
             let md5 = sse_c_key_md5(key)?;
-            create_req = create_req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+            create_req = create_req
+                .sse_customer_key(key.clone())
+                .sse_customer_key_md5(md5);
         }
     }
     let multipart_upload = create_req.send().await?;
@@ -618,7 +613,9 @@ async fn upload_file_multipart(
                     .key(key)
                     .upload_id(upload_id)
                     .part_number(part_number)
-                    .body(ByteStream::from(part_data.ok_or("Internal error: part buffer missing on non-RDMA path")?));
+                    .body(ByteStream::from(part_data.ok_or(
+                        "Internal error: part buffer missing on non-RDMA path",
+                    )?));
                 if checksum_mode.is_some() {
                     req = req.checksum_algorithm(effective_algo.clone());
                 }
@@ -772,7 +769,9 @@ pub async fn download_file(
             request = request.sse_customer_algorithm(algo);
             if let Some(ref key_val) = sse.sse_c_key {
                 let md5 = sse_c_key_md5(key_val)?;
-                request = request.sse_customer_key(key_val.clone()).sse_customer_key_md5(md5);
+                request = request
+                    .sse_customer_key(key_val.clone())
+                    .sse_customer_key_md5(md5);
             }
         }
         let rdma_confirmed = Arc::new(AtomicBool::new(false));
@@ -813,7 +812,9 @@ pub async fn download_file(
         request = request.sse_customer_algorithm(algo);
         if let Some(ref key_val) = sse.sse_c_key {
             let md5 = sse_c_key_md5(key_val)?;
-            request = request.sse_customer_key(key_val.clone()).sse_customer_key_md5(md5);
+            request = request
+                .sse_customer_key(key_val.clone())
+                .sse_customer_key_md5(md5);
         }
     }
     let response = request.send().await?;
@@ -852,7 +853,9 @@ pub async fn copy_s3_to_s3(
         request = request.sse_customer_algorithm(algo);
         if let Some(ref key) = sse.sse_c_key {
             let md5 = sse_c_key_md5(key)?;
-            request = request.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
+            request = request
+                .sse_customer_key(key.clone())
+                .sse_customer_key_md5(md5);
         }
     }
     if sse.sse_c_copy_source.is_some() || sse.sse_c_copy_source_key.is_some() {
@@ -926,7 +929,12 @@ async fn copy_recursive(
                 bucket: dst_bucket,
                 key: dst_key,
             },
-        ) => copy_s3_directory(client, src_bucket, src_key, dst_bucket, dst_key, filter, sse).await,
+        ) => {
+            copy_s3_directory(
+                client, src_bucket, src_key, dst_bucket, dst_key, filter, sse,
+            )
+            .await
+        }
         (PathType::Local(_), PathType::Local(_)) => Err(
             "Local to local recursive copy not implemented. Use standard 'cp -r' command.".into(),
         ),
@@ -965,7 +973,8 @@ async fn upload_directory(
 
             upload_file(
                 client,
-                path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", path.display()))?,
+                path.to_str()
+                    .ok_or_else(|| format!("path contains invalid UTF-8: {}", path.display()))?,
                 bucket,
                 &s3_key,
                 None,
@@ -1026,7 +1035,9 @@ async fn download_directory(
                     client,
                     bucket,
                     key,
-                    local_path.to_str().ok_or_else(|| format!("path contains invalid UTF-8: {}", local_path.display()))?,
+                    local_path.to_str().ok_or_else(|| {
+                        format!("path contains invalid UTF-8: {}", local_path.display())
+                    })?,
                     None,
                     sse,
                     #[cfg(feature = "rdma")]
