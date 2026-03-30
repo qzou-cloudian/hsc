@@ -96,7 +96,7 @@ region = us-east-1
 
 ### Multipart Upload Settings
 
-Control multipart uploads with CLI flags (apply per-command):
+Control multipart uploads with CLI flags (per-command, highest priority):
 
 ```bash
 hsc cp large.bin s3://bucket/ --part-size 64m        # 64 MiB parts
@@ -106,9 +106,16 @@ hsc sync --part-size 32m ./data/ s3://bucket/
 
 `--part-size` sets both the threshold and chunk size. `--disable-multipart` forces
 a single PUT for all files (max 5 GiB). The two flags are mutually exclusive.
-Default part size: 8 MiB.
 
-Accepted size suffixes: `k`/`K` (KiB), `m`/`M` (MiB), `g`/`G` (GiB), or plain bytes.
+Or configure defaults in `~/.aws/config`:
+
+```ini
+[s3]
+multipart_threshold = 10MB
+multipart_chunksize = 5MB
+```
+
+Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8 MiB)
 
 ### Global Options
 

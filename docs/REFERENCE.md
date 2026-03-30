@@ -325,7 +325,7 @@ temp*           # Files starting with "temp"
 
 ## Multipart Upload
 
-Controlled via per-command CLI flags:
+Controlled via per-command CLI flags (highest priority) or `~/.aws/config` defaults.
 
 | Flag | Effect |
 |---|---|
@@ -334,7 +334,18 @@ Controlled via per-command CLI flags:
 
 `--disable-multipart` and `--part-size` are mutually exclusive.
 Accepted size suffixes: `k`/`K` (KiB), `m`/`M` (MiB), `g`/`G` (GiB), or plain bytes.
-**Default:** 8 MiB threshold and chunk size.
+
+When neither flag is given, values come from `~/.aws/config`:
+
+```ini
+[s3]
+multipart_threshold = 10MB    # Files >= this size use multipart upload
+multipart_chunksize = 5MB     # Size of each part
+```
+
+**Supported config size formats:** Plain bytes (`8388608`), `8MB`/`8M`, `5120KB`/`5120K`, `1GB`/`1G`
+
+**Default:** 8 MiB for both threshold and chunksize
 
 **Commands That Use Multipart:**
 - `cp` - When uploading to S3
