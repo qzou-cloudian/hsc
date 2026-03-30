@@ -1006,7 +1006,8 @@ wait
 collect_results
 
 # ── Step 8e: SSE-C key validation ────────────────────────────────────────────
-# These tests run unconditionally (independent of HSC_SSE).
+# Runs only when HSC_SSE is set (AES256, sse-c, aws:kms).
+# Requires the S3 server to support SSE-C.  Skip if SSE is not configured.
 # A fresh random 256-bit key is generated; the test verifies that:
 #   (a) upload with SSE-C key succeeds
 #   (b) download with the correct key succeeds and content is intact
@@ -1014,10 +1015,13 @@ collect_results
 #   (d) download with a WRONG key fails
 step_time
 echo ""
+_SSEC_OBJ="ssec_validate_test.dat"
+if [[ -z "$HSC_SSE" ]]; then
+    info "Step 8e: SSE-C key validation skipped (set HSC_SSE=sse-c to enable)"
+else
 info "Step 8e: SSE-C key validation tests..."
 _SSEC_KEY=$(openssl rand -base64 32)
 _SSEC_WRONG=$(openssl rand -base64 32)
-_SSEC_OBJ="ssec_validate_test.dat"
 _SSEC_SIZE=65536
 truncate -s $_SSEC_SIZE "$TEST_DIR/$_SSEC_OBJ" 2>/dev/null || dd if=/dev/random of="$TEST_DIR/$_SSEC_OBJ" bs=$_SSEC_SIZE count=1 status=none
 
@@ -1056,6 +1060,10 @@ else
     success "SSE-C: download with wrong key correctly rejected by server"
 fi
 rm -f "$_ssec_dl"
+
+# Clean up SSE-C test object
+$BINARY rm "s3://$BUCKET_NAME/$_SSEC_OBJ" >/dev/null 2>&1 || true
+fi  # end HSC_SSE guard
 
 # ── Step 8f: sync --delete and sync --checksum ────────────────────────────────
 step_time
