@@ -94,6 +94,7 @@ fi
 # Usage:
 #   ./examples/s3_functional_test.sh                    # create+delete a temp bucket
 #   ./examples/s3_functional_test.sh my-bucket          # use existing bucket, skip mb/rb
+ENDPOINT="${AWS_ENDPOINT_URL}"
 BUCKET_NAME="${1:-test-bucket-$(date +%s)}"
 BUCKET_PROVIDED="${1:+true}"   # non-empty when caller supplied a bucket name
 TEST_DIR="./test_data"
@@ -414,14 +415,12 @@ info "Step 4: Testing range requests and verifying data integrity with 'hsc cmp'
 # subshell and collect results via collect_results().
 check_range() {
     local ok_msg=$1 fail_msg=$2 orig=$3 range=$4 s3uri=$5
-    local _key="${s3uri##*/}"
-    local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
     # shellcheck disable=SC2086
     if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
         echo "PASS:$ok_msg"
     else
         echo "FAIL:$fail_msg"
-        echo "RERUN:truncate -s ${_sz} /tmp/${_key} && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/${_key} s3://\$BUCKET_NAME/${_key} && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/${_key} s3://\$BUCKET_NAME/${_key}"
+        echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
     fi
 }
 
@@ -616,13 +615,12 @@ _cmp_range() {
     local label=$1 range=$2
     local orig="$TEST_DIR/chunk_boundary/cb_${label}.dat"
     local s3uri="s3://$BUCKET_NAME/cb_${label}.dat"
-    local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
     # shellcheck disable=SC2086
     if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
         echo "PASS:getObjectRange [cb_${label}] $range"
     else
         echo "FAIL:getObjectRange [cb_${label}] $range — FAILED"
-        echo "RERUN:truncate -s ${_sz} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
+        echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
     fi
 }
 
@@ -729,7 +727,7 @@ for part_size in "${MPC_SIZES[@]}"; do
                 echo "PASS:getObjectRange $key chunk${ci}→$((ci+1)) boundary $range"
             else
                 echo "FAIL:getObjectRange $key chunk${ci}→$((ci+1)) boundary FAILED $range"
-                echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key && \$BINARY cmp --range \"$range\" /tmp/$key s3://\$BUCKET_NAME/$key"
+                echo "RERUN:\$BINARY cmp --range \"$range\" $combined s3://\$BUCKET_NAME/$key"
             fi
         ) > "$RESULTS_DIR/job_${_JOB}" &
         ((_JOB++))
@@ -893,13 +891,12 @@ _ec_range() {
     local label=$1 range=$2
     local orig="$TEST_DIR/ec/ec_${label}.dat"
     local s3uri="s3://$BUCKET_NAME/ec_${label}.dat"
-    local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
     # shellcheck disable=SC2086
     if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
         echo "PASS:getObjectRange [ec_${label}] $range"
     else
         echo "FAIL:getObjectRange [ec_${label}] $range — FAILED"
-        echo "RERUN:truncate -s ${_sz} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
+        echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
     fi
 }
 
@@ -1033,7 +1030,7 @@ for i in "${!EC_MP_PART_LABELS[@]}"; do
                     echo "PASS:getObjectRange ec_mp_${label} stride=${stride} @${boundary} OK"
                 else
                     echo "FAIL:getObjectRange ec_mp_${label} stride=${stride} @${boundary} FAILED"
-                    echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key && \$BINARY cmp --range \"$range\" /tmp/$key s3://\$BUCKET_NAME/$key"
+                    echo "RERUN:\$BINARY cmp --range \"$range\" $combined s3://\$BUCKET_NAME/$key"
                 fi
             ) > "$RESULTS_DIR/job_${_JOB}" &
             ((_JOB++))
