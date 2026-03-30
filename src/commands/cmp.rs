@@ -205,20 +205,28 @@ async fn open_reader(
                 return Err(format!("'{}' is an S3 bucket, not an object", path).into());
             }
 
-            // HEAD to get total size
-            let mut head_req = client.head_object().bucket(&bucket).key(&key);
-            if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
-                let md5 = sse_c_key_md5(key_b64)?;
-                head_req = head_req
-                    .sse_customer_algorithm(algo)
-                    .sse_customer_key(key_b64)
-                    .sse_customer_key_md5(md5);
-            }
-            let head = head_req
-                .send()
-                .await
-                .map_err(|e| format!("Cannot stat s3://{}/{}: {}", bucket, key, e))?;
-            let total_size = head.content_length().unwrap_or(0) as u64;
+            // HEAD is only needed for a full-file comparison (to detect size differences
+            // before streaming).  When a range/size limit is already known, skip it —
+            // total_size is unused in that code path and the HEAD would be a wasted request
+            // (especially costly when many range-checks run in parallel).
+            let total_size = if limit.is_none() {
+                let mut head_req = client.head_object().bucket(&bucket).key(&key);
+                if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
+                    let md5 = sse_c_key_md5(key_b64)?;
+                    head_req = head_req
+                        .sse_customer_algorithm(algo)
+                        .sse_customer_key(key_b64)
+                        .sse_customer_key_md5(md5);
+                }
+                let head = head_req
+                    .send()
+                    .await
+                    .map_err(|e| format!("Cannot stat s3://{}/{}: {}", bucket, key, e))?;
+                head.content_length().unwrap_or(0) as u64
+            } else {
+                // Range-limited: total_size is never used, skip HEAD.
+                0
+            };
 
             // Byte count for this particular request (may be a sub-range).
             // Only used in the RDMA path below; suppress the warning for non-rdma builds.

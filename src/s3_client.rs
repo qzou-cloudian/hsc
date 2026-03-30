@@ -6,7 +6,6 @@ use aws_smithy_runtime_api::client::interceptors::context::BeforeTransmitInterce
 use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
-use aws_smithy_types::retry::RetryConfig;
 use aws_smithy_types::timeout::TimeoutConfig;
 use std::env;
 use std::sync::Arc;
@@ -216,10 +215,6 @@ pub async fn create_s3_client(
             "anonymous",
         ));
     }
-
-    // Retry up to 10 attempts (default 3 is too low for high-concurrency workloads).
-    // The AWS SDK also honours AWS_MAX_ATTEMPTS env var for user overrides.
-    loader = loader.retry_config(RetryConfig::standard().with_max_attempts(10));
 
     // Load the AWS config (respects AWS_CONFIG_FILE and AWS_SHARED_CREDENTIALS_FILE)
     let aws_config = loader.load().await;
