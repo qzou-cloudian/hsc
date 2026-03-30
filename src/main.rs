@@ -127,6 +127,12 @@ enum Commands {
         /// Base64-encoded 256-bit customer key for SSE-C copy source decryption
         #[arg(long, value_name = "KEY")]
         sse_c_copy_source_key: Option<String>,
+        /// Disable multipart uploads; always use a single PUT (max 5 GiB per object)
+        #[arg(long, conflicts_with = "part_size")]
+        disable_multipart: bool,
+        /// Part size for multipart uploads, e.g. 16m, 256m, 1g (sets both threshold and chunk size)
+        #[arg(long, value_name = "SIZE", conflicts_with = "disable_multipart")]
+        part_size: Option<String>,
     },
     /// Synchronize directories
     Sync {
@@ -164,6 +170,12 @@ enum Commands {
         /// Base64-encoded 256-bit customer key for SSE-C copy source decryption
         #[arg(long, value_name = "KEY")]
         sse_c_copy_source_key: Option<String>,
+        /// Disable multipart uploads; always use a single PUT (max 5 GiB per object)
+        #[arg(long, conflicts_with = "part_size")]
+        disable_multipart: bool,
+        /// Part size for multipart uploads, e.g. 16m, 256m, 1g (sets both threshold and chunk size)
+        #[arg(long, value_name = "SIZE", conflicts_with = "disable_multipart")]
+        part_size: Option<String>,
     },
     /// Move files
     Mv {
@@ -198,6 +210,12 @@ enum Commands {
         /// Base64-encoded 256-bit customer key for SSE-C copy source decryption
         #[arg(long, value_name = "KEY")]
         sse_c_copy_source_key: Option<String>,
+        /// Disable multipart uploads; always use a single PUT (max 5 GiB per object)
+        #[arg(long, conflicts_with = "part_size")]
+        disable_multipart: bool,
+        /// Part size for multipart uploads, e.g. 16m, 256m, 1g (sets both threshold and chunk size)
+        #[arg(long, value_name = "SIZE", conflicts_with = "disable_multipart")]
+        part_size: Option<String>,
     },
     /// Remove S3 objects
     Rm {
@@ -282,6 +300,45 @@ enum Commands {
         #[arg(long)]
         sse_c_key: Option<String>,
     },
+}
+
+/// Parse a human-readable size string into bytes.
+/// Accepted suffixes: b/B (bytes), k/K (KiB), m/M (MiB), g/G (GiB).
+/// A bare number is treated as bytes.
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num, mult) = if let Some(n) = s.strip_suffix(['G', 'g']) {
+        (n, 1u64 << 30)
+    } else if let Some(n) = s.strip_suffix(['M', 'm']) {
+        (n, 1u64 << 20)
+    } else if let Some(n) = s.strip_suffix(['K', 'k']) {
+        (n, 1u64 << 10)
+    } else if let Some(n) = s.strip_suffix(['B', 'b']) {
+        (n, 1u64)
+    } else {
+        (s, 1u64)
+    };
+    let base: u64 = num
+        .parse()
+        .map_err(|_| format!("invalid size '{s}': expected a number with optional suffix k/m/g"))?;
+    Ok(base * mult)
+}
+
+/// Resolve effective multipart threshold and chunk size from CLI flags and config defaults.
+fn resolve_multipart(
+    disable_multipart: bool,
+    part_size: Option<String>,
+    default_threshold: u64,
+    default_chunksize: u64,
+) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+    if disable_multipart {
+        Ok((u64::MAX, default_chunksize))
+    } else if let Some(s) = part_size {
+        let size = parse_size(&s)?;
+        Ok((size, size))
+    } else {
+        Ok((default_threshold, default_chunksize))
+    }
 }
 
 #[tokio::main]
@@ -371,6 +428,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sse_c_key,
             sse_c_copy_source,
             sse_c_copy_source_key,
+            disable_multipart,
+            part_size,
         } => {
             let sse_config = commands::cp::SseConfig {
                 sse,
@@ -380,6 +439,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
+            let (threshold, chunksize) = resolve_multipart(
+                disable_multipart,
+                part_size,
+                client_config_clone.multipart_threshold,
+                client_config_clone.multipart_chunksize,
+            )?;
             commands::cp::copy(
                 &client,
                 &source,
@@ -389,8 +454,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 exclude,
                 checksum,
                 sse_config,
-                client_config_clone.multipart_threshold,
-                client_config_clone.multipart_chunksize,
+                threshold,
+                chunksize,
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
@@ -409,6 +474,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sse_c_key,
             sse_c_copy_source,
             sse_c_copy_source_key,
+            disable_multipart,
+            part_size,
         } => {
             let sse_config = commands::cp::SseConfig {
                 sse,
@@ -418,6 +485,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
+            let (threshold, chunksize) = resolve_multipart(
+                disable_multipart,
+                part_size,
+                client_config_clone.multipart_threshold,
+                client_config_clone.multipart_chunksize,
+            )?;
             commands::sync::sync(
                 &client,
                 &source,
@@ -427,8 +500,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 checksum,
                 delete,
                 sse_config,
-                client_config_clone.multipart_threshold,
-                client_config_clone.multipart_chunksize,
+                threshold,
+                chunksize,
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
@@ -446,6 +519,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             sse_c_key,
             sse_c_copy_source,
             sse_c_copy_source_key,
+            disable_multipart,
+            part_size,
         } => {
             let sse_config = commands::cp::SseConfig {
                 sse,
@@ -455,6 +530,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
+            let (threshold, chunksize) = resolve_multipart(
+                disable_multipart,
+                part_size,
+                client_config_clone.multipart_threshold,
+                client_config_clone.multipart_chunksize,
+            )?;
             commands::mv::move_files(
                 &client,
                 &source,
@@ -463,8 +544,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 include,
                 exclude,
                 sse_config,
-                client_config_clone.multipart_threshold,
-                client_config_clone.multipart_chunksize,
+                threshold,
+                chunksize,
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
