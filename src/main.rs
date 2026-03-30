@@ -401,7 +401,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "rdma")]
     let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaProvider>> =
         match &client_config_clone.rdma_provider {
-            Some(p) => Some(rdma::create_provider(p, client_config_clone.debug)?),
+            Some(p) => match rdma::create_provider(p, client_config_clone.debug) {
+                Ok(provider) => Some(provider),
+                Err(e) => {
+                    eprintln!(
+                        "Warning: RDMA provider '{}' unavailable, falling back to standard I/O: {}",
+                        p, e
+                    );
+                    None
+                }
+            },
             None => None,
         };
 
