@@ -4,6 +4,16 @@ All notable changes to hsc will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `--disable-multipart` option for `cp`, `sync`, and `mv`: forces a single PUT
+  for all uploads regardless of file size (max 5 GiB per object)
+- `--part-size <SIZE>` option for `cp`, `sync`, and `mv`: sets both the multipart
+  threshold and chunk size per command (e.g. `16m`, `256m`, `1g`, or plain bytes);
+  conflicts with `--disable-multipart`
+  - Priority: CLI flag > `~/.aws/config` `[s3]` `multipart_threshold`/`multipart_chunksize` > 8 MiB default
+- `--sse-c` / `--sse-c-key` options for `cmp`: enables SSE-C decryption when
+  comparing S3 objects encrypted with customer-provided keys
+
 ## [0.3.0] - 2026-03-29
 
 ### Added
