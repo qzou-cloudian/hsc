@@ -114,7 +114,7 @@ FAILED_TESTS=()   # accumulates every failure message for the end-of-run summary
 FAILED_CMDS=()    # parallel array: rerun command for each failure
 
 # Object sizes to test
-SIZES=("1b" "2b" "3b" "10b" "1k" "8k" "64k" "512k" "1m" "8m" "16m" "24m" "32m" "64m")
+SIZES=("1b" "2b" "5b" "10b" "1k" "8k" "64k" "512k" "1m" "8m" "16m" "24m" "32m" "64m")
 
 echo "========================================="
 echo "S3 Functional Test"
@@ -410,17 +410,18 @@ echo ""
 info "Step 4: Testing range requests and verifying data integrity with 'hsc cmp'..."
 
 # check_range <ok_msg> <fail_msg> <original_file> <range_spec> <s3_uri>
-# Runs hsc cmp --range; calls success or error (with rerun command) directly.
+# Emits PASS:/FAIL:/RERUN: to stdout so callers can run it in a background
+# subshell and collect results via collect_results().
 check_range() {
     local ok_msg=$1 fail_msg=$2 orig=$3 range=$4 s3uri=$5
     local _key="${s3uri##*/}"
     local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
     # shellcheck disable=SC2086
     if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
-        success "$ok_msg"
+        echo "PASS:$ok_msg"
     else
-        error "$fail_msg" \
-            "truncate -s ${_sz} /tmp/${_key} && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/${_key} s3://\$BUCKET_NAME/${_key} && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/${_key} s3://\$BUCKET_NAME/${_key}"
+        echo "FAIL:$fail_msg"
+        echo "RERUN:truncate -s ${_sz} /tmp/${_key} && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/${_key} s3://\$BUCKET_NAME/${_key} && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/${_key} s3://\$BUCKET_NAME/${_key}"
     fi
 }
 
@@ -440,76 +441,105 @@ verify_range() {
 
 # Test different ranges on 1m file
 test_ranges=("bytes=0-1023" "bytes=1024-2047" "bytes=0-511" "bytes=512000-1048575")
+_JOB=0
 for range in "${test_ranges[@]}"; do
     original_file="$TEST_DIR/testfile_1m.dat"
-    info "Verifying testfile_1m.dat range: $range..."
-    check_range "Range verified: $range" "Range integrity failed: $range" \
-        "$original_file" "$range" "s3://$BUCKET_NAME/testfile_1m.dat"
+    (
+        echo "INFO:Verifying testfile_1m.dat range: $range..."
+        check_range "Range verified: $range" "Range integrity failed: $range" \
+            "$original_file" "$range" "s3://$BUCKET_NAME/testfile_1m.dat"
+    ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 done
 
-info "Testing range on large file (64m)..."
-check_range "Range on 64m file verified: bytes=0-1048575 (1MB)" \
-    "Range on 64m file integrity failed: bytes=0-1048575" \
-    "$TEST_DIR/testfile_64m.dat" "bytes=0-1048575" "s3://$BUCKET_NAME/testfile_64m.dat"
+(
+    echo "INFO:Testing range on large file (64m)..."
+    check_range "Range on 64m file verified: bytes=0-1048575 (1MB)" \
+        "Range on 64m file integrity failed: bytes=0-1048575" \
+        "$TEST_DIR/testfile_64m.dat" "bytes=0-1048575" "s3://$BUCKET_NAME/testfile_64m.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 
-info "Testing middle range on 8m file..."
-check_range "Middle range on 8m file verified: bytes=4194304-5242879" \
-    "Middle range on 8m file integrity failed: bytes=4194304-5242879" \
-    "$TEST_DIR/testfile_8m.dat" "bytes=4194304-5242879" "s3://$BUCKET_NAME/testfile_8m.dat"
+(
+    echo "INFO:Testing middle range on 8m file..."
+    check_range "Middle range on 8m file verified: bytes=4194304-5242879" \
+        "Middle range on 8m file integrity failed: bytes=4194304-5242879" \
+        "$TEST_DIR/testfile_8m.dat" "bytes=4194304-5242879" "s3://$BUCKET_NAME/testfile_8m.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 
-info "Testing last 1KB of 32m file..."
-check_range "Last 1KB of 32m file verified: bytes=33553408-33554431" \
-    "Last 1KB of 32m file integrity failed: bytes=33553408-33554431" \
-    "$TEST_DIR/testfile_32m.dat" "bytes=33553408-33554431" "s3://$BUCKET_NAME/testfile_32m.dat"
+(
+    echo "INFO:Testing last 1KB of 32m file..."
+    check_range "Last 1KB of 32m file verified: bytes=33553408-33554431" \
+        "Last 1KB of 32m file integrity failed: bytes=33553408-33554431" \
+        "$TEST_DIR/testfile_32m.dat" "bytes=33553408-33554431" "s3://$BUCKET_NAME/testfile_32m.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 
 echo ""
 info "Testing range requests on multipart uploaded objects..."
-
 info "Testing ranges on multipart object with 1m parts (3MB total)..."
-check_range "Multipart 1m: First half of part 1 verified" \
-    "Multipart 1m: First half of part 1 integrity failed" \
-    "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=0-524287" \
-    "s3://$BUCKET_NAME/multipart_1m_parts.dat"
-info "  CRITICAL: Range across part 1->2 boundary"
-check_range "Multipart 1m: Range across part boundary (part 1->2) verified" \
-    "Multipart 1m: Range across part boundary integrity failed" \
-    "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1048000-1049599" \
-    "s3://$BUCKET_NAME/multipart_1m_parts.dat"
-check_range "Multipart 1m: Middle of part 2 verified" \
-    "Multipart 1m: Middle of part 2 integrity failed" \
-    "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1572864-2097151" \
-    "s3://$BUCKET_NAME/multipart_1m_parts.dat"
+
+(
+    check_range "Multipart 1m: First half of part 1 verified" \
+        "Multipart 1m: First half of part 1 integrity failed" \
+        "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=0-524287" \
+        "s3://$BUCKET_NAME/multipart_1m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+(
+    echo "INFO:  CRITICAL: Range across part 1->2 boundary"
+    check_range "Multipart 1m: Range across part boundary (part 1->2) verified" \
+        "Multipart 1m: Range across part boundary integrity failed" \
+        "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1048000-1049599" \
+        "s3://$BUCKET_NAME/multipart_1m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+(
+    check_range "Multipart 1m: Middle of part 2 verified" \
+        "Multipart 1m: Middle of part 2 integrity failed" \
+        "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1572864-2097151" \
+        "s3://$BUCKET_NAME/multipart_1m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 
 info "Testing ranges on multipart object with 16m parts (48MB total)..."
-check_range "Multipart 16m: First 8MB of part 1 verified" \
-    "Multipart 16m: First 8MB integrity failed" \
-    "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=0-8388607" \
-    "s3://$BUCKET_NAME/multipart_16m_parts.dat"
-info "  CRITICAL: Range across 16MB part boundary"
-check_range "Multipart 16m: Range across part boundary (16MB boundary) verified" \
-    "Multipart 16m: Range across part boundary integrity failed" \
-    "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=16776192-16778239" \
-    "s3://$BUCKET_NAME/multipart_16m_parts.dat"
-check_range "Multipart 16m: Range in part 3 verified" \
-    "Multipart 16m: Range in part 3 integrity failed" \
-    "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=40000000-41000000" \
-    "s3://$BUCKET_NAME/multipart_16m_parts.dat"
+(
+    check_range "Multipart 16m: First 8MB of part 1 verified" \
+        "Multipart 16m: First 8MB integrity failed" \
+        "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=0-8388607" \
+        "s3://$BUCKET_NAME/multipart_16m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+(
+    echo "INFO:  CRITICAL: Range across 16MB part boundary"
+    check_range "Multipart 16m: Range across part boundary (16MB boundary) verified" \
+        "Multipart 16m: Range across part boundary integrity failed" \
+        "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=16776192-16778239" \
+        "s3://$BUCKET_NAME/multipart_16m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+(
+    check_range "Multipart 16m: Range in part 3 verified" \
+        "Multipart 16m: Range in part 3 integrity failed" \
+        "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=40000000-41000000" \
+        "s3://$BUCKET_NAME/multipart_16m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 
 info "Testing ranges on multipart object with 32m parts (96MB total)..."
-check_range "Multipart 32m: End of part 1 verified" \
-    "Multipart 32m: End of part 1 integrity failed" \
-    "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=33554000-33554431" \
-    "s3://$BUCKET_NAME/multipart_32m_parts.dat"
-info "  CRITICAL: Range across part 2->3 boundary (64MB mark)"
-check_range "Multipart 32m: Range across part 2->3 boundary (64MB) verified" \
-    "Multipart 32m: Range across part 2->3 boundary integrity failed" \
-    "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=67108000-67109000" \
-    "s3://$BUCKET_NAME/multipart_32m_parts.dat"
-info "  CRITICAL: Large range spanning all 3 parts (80MB)"
-check_range "Multipart 32m: Large range spanning all parts verified (80MB)" \
-    "Multipart 32m: Large range spanning all parts integrity failed" \
-    "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=10000000-90000000" \
-    "s3://$BUCKET_NAME/multipart_32m_parts.dat"
+(
+    check_range "Multipart 32m: End of part 1 verified" \
+        "Multipart 32m: End of part 1 integrity failed" \
+        "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=33554000-33554431" \
+        "s3://$BUCKET_NAME/multipart_32m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+(
+    echo "INFO:  CRITICAL: Range across part 2->3 boundary (64MB mark)"
+    check_range "Multipart 32m: Range across part 2->3 boundary (64MB) verified" \
+        "Multipart 32m: Range across part 2->3 boundary integrity failed" \
+        "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=67108000-67109000" \
+        "s3://$BUCKET_NAME/multipart_32m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+(
+    echo "INFO:  CRITICAL: Large range spanning all 3 parts (80MB)"
+    check_range "Multipart 32m: Large range spanning all parts verified (80MB)" \
+        "Multipart 32m: Large range spanning all parts integrity failed" \
+        "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=10000000-90000000" \
+        "s3://$BUCKET_NAME/multipart_32m_parts.dat"
+) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+wait
+collect_results
 
 # Step 5: Chunk boundary tests — putObject / getObject
 step_time
@@ -589,53 +619,56 @@ _cmp_range() {
     local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
     # shellcheck disable=SC2086
     if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
-        success "getObjectRange [cb_${label}] $range"
+        echo "PASS:getObjectRange [cb_${label}] $range"
     else
-        error "getObjectRange [cb_${label}] $range — FAILED" \
-              "truncate -s ${_sz} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
+        echo "FAIL:getObjectRange [cb_${label}] $range — FAILED"
+        echo "RERUN:truncate -s ${_sz} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
     fi
 }
 
 # chunk1_exact (size=C): object fills exactly one chunk; test boundary edge bytes
 info "  [chunk1_exact size=${C}]"
-_cmp_range chunk1_exact "bytes=0-0"
-_cmp_range chunk1_exact "bytes=$((C-1))-$((C-1))"
-_cmp_range chunk1_exact "bytes=$((C/2))-$((C-1))"
+_JOB=0
+( _cmp_range chunk1_exact "bytes=0-0" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _cmp_range chunk1_exact "bytes=$((C-1))-$((C-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _cmp_range chunk1_exact "bytes=$((C/2))-$((C-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
 
 # chunk1_plus1 (size=C+1): 1 byte spills into 2nd chunk — straddle chunk1 boundary
 info "  [chunk1_plus1 size=$((C+1))] — chunk1 boundary straddle"
-_cmp_range chunk1_plus1 "bytes=$((C-4))-$((C-1))"    # last 4 bytes of chunk1
-_cmp_range chunk1_plus1 "bytes=$((C))-$((C))"         # only byte in chunk2
-_cmp_range chunk1_plus1 "bytes=$((C-1))-$((C))"       # 1 byte each side of boundary
-_cmp_range chunk1_plus1 "bytes=$((C-4))-$((C))"       # 5 bytes crossing boundary
+( _cmp_range chunk1_plus1 "bytes=$((C-4))-$((C-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # last 4 bytes of chunk1
+( _cmp_range chunk1_plus1 "bytes=$((C))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))         # only byte in chunk2
+( _cmp_range chunk1_plus1 "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 1 byte each side of boundary
+( _cmp_range chunk1_plus1 "bytes=$((C-4))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 5 bytes crossing boundary
 
 # chunk2_minus1 (size=2C-1): ends 1 byte before the 2nd chunk boundary
 info "  [chunk2_minus1 size=$((C2-1))]"
-_cmp_range chunk2_minus1 "bytes=$((C-4))-$((C+3))"    # cross chunk1→2 boundary
-_cmp_range chunk2_minus1 "bytes=$((C2-5))-$((C2-2))"  # last 4 bytes of object
+( _cmp_range chunk2_minus1 "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # cross chunk1→2 boundary
+( _cmp_range chunk2_minus1 "bytes=$((C2-5))-$((C2-2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))  # last 4 bytes of object
 
 # chunk2_exact (size=2C): two full chunks
 info "  [chunk2_exact size=${C2}]"
-_cmp_range chunk2_exact "bytes=$((C-4))-$((C+3))"     # cross chunk1→2 boundary
-_cmp_range chunk2_exact "bytes=$((C-1))-$((C))"        # single-byte straddle
-_cmp_range chunk2_exact "bytes=$((C2-4))-$((C2-1))"   # last 4 bytes
-_cmp_range chunk2_exact "bytes=0-$((C2-1))"            # full object
+( _cmp_range chunk2_exact "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # cross chunk1→2 boundary
+( _cmp_range chunk2_exact "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # single-byte straddle
+( _cmp_range chunk2_exact "bytes=$((C2-4))-$((C2-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))   # last 4 bytes
+( _cmp_range chunk2_exact "bytes=0-$((C2-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # full object
 
 # chunk2_plus1 (size=2C+1): 1 byte spills into 3rd chunk — straddle chunk2 boundary
 info "  [chunk2_plus1 size=$((C2+1))] — chunk2 boundary straddle"
-_cmp_range chunk2_plus1 "bytes=$((C-4))-$((C+3))"     # cross chunk1→2
-_cmp_range chunk2_plus1 "bytes=$((C2-1))-$((C2))"     # 1 byte each side of chunk2
-_cmp_range chunk2_plus1 "bytes=$((C2-4))-$((C2))"     # 5 bytes crossing chunk2→3
-_cmp_range chunk2_plus1 "bytes=$((C2))-$((C2))"        # only byte in chunk3
+( _cmp_range chunk2_plus1 "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # cross chunk1→2
+( _cmp_range chunk2_plus1 "bytes=$((C2-1))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # 1 byte each side of chunk2
+( _cmp_range chunk2_plus1 "bytes=$((C2-4))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # 5 bytes crossing chunk2→3
+( _cmp_range chunk2_plus1 "bytes=$((C2))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # only byte in chunk3
 
 # chunk3_exact (size=3C): three full chunks — every boundary exercised
 info "  [chunk3_exact size=${C3}] — all boundaries"
-_cmp_range chunk3_exact "bytes=$((C-4))-$((C+3))"      # chunk1→2
-_cmp_range chunk3_exact "bytes=$((C-1))-$((C))"         # chunk1→2 single-byte straddle
-_cmp_range chunk3_exact "bytes=$((C2-4))-$((C2+3))"    # chunk2→3
-_cmp_range chunk3_exact "bytes=$((C2-1))-$((C2))"       # chunk2→3 single-byte straddle
-_cmp_range chunk3_exact "bytes=$((C3-4))-$((C3-1))"    # last 4 bytes of object
-_cmp_range chunk3_exact "bytes=$((C/2))-$((C2+C/2-1))" # large range spanning all boundaries
+( _cmp_range chunk3_exact "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))      # chunk1→2
+( _cmp_range chunk3_exact "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))         # chunk1→2 single-byte straddle
+( _cmp_range chunk3_exact "bytes=$((C2-4))-$((C2+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # chunk2→3
+( _cmp_range chunk3_exact "bytes=$((C2-1))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # chunk2→3 single-byte straddle
+( _cmp_range chunk3_exact "bytes=$((C3-4))-$((C3-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # last 4 bytes of object
+( _cmp_range chunk3_exact "bytes=$((C/2))-$((C2+C/2-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++)) # large range spanning all boundaries
+wait
+collect_results
 
 # Step 6: uploadPart — multipart with part sizes that cross storage chunk boundaries
 step_time
@@ -850,65 +883,68 @@ _ec_range() {
     local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
     # shellcheck disable=SC2086
     if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
-        success "getObjectRange [ec_${label}] $range"
+        echo "PASS:getObjectRange [ec_${label}] $range"
     else
-        error "getObjectRange [ec_${label}] $range — FAILED" \
-              "truncate -s ${_sz} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
+        echo "FAIL:getObjectRange [ec_${label}] $range — FAILED"
+        echo "RERUN:truncate -s ${_sz} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
     fi
 }
 
 # EC4+2 stripe-1 boundary (offset = S42) — object size must be > S42
 info "  EC4+2 stripe-1 @ offset ${S42} (policy boundary: C/4)"
-_ec_range "s42_p1"     "bytes=$((S42-1))-$((S42))"           # 2B straddle
-_ec_range "s42_p1"     "bytes=$((S42-4))-$((S42))"           # 4B before + boundary
+_JOB=0
+( _ec_range "s42_p1"     "bytes=$((S42-1))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))           # 2B straddle
+( _ec_range "s42_p1"     "bytes=$((S42-4))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))           # 4B before + boundary
 
 # EC4+2 stripe-3 boundary (offset = 3*S42) — last stripe edge before chunk end
 info "  EC4+2 stripe-3 @ offset $((3*S42)) (policy boundary: 3C/4)"
-_ec_range "s42x3_p1"   "bytes=$((3*S42-1))-$((3*S42))"       # 2B straddle
-_ec_range "s42x3_p1"   "bytes=$((3*S42-4))-$((3*S42))"       # 4B before
+( _ec_range "s42x3_p1"   "bytes=$((3*S42-1))-$((3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 2B straddle
+( _ec_range "s42x3_p1"   "bytes=$((3*S42-4))-$((3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 4B before
 
 # EC2+1 stripe boundary (offset = S21 = 2*S42)
 info "  EC2+1 stripe   @ offset ${S21} (policy boundary: C/2)"
-_ec_range "s21_p1"     "bytes=$((S21-1))-$((S21))"            # 2B straddle
-_ec_range "s21_p1"     "bytes=$((S21-4))-$((S21))"
-_ec_range "s21_p1"     "bytes=0-$((S21))"                     # first stripe + 1B
+( _ec_range "s21_p1"     "bytes=$((S21-1))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # 2B straddle
+( _ec_range "s21_p1"     "bytes=$((S21-4))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "s21_p1"     "bytes=0-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                     # first stripe + 1B
 
 # Inside chunk-2: EC4+2 stripe-1 (offset = C+S42)
 info "  EC4+2 stripe-1 in chunk-2 @ offset $((C+S42))"
-_ec_range "c_s42_p1"   "bytes=$((C+S42-1))-$((C+S42))"       # 2B straddle
-_ec_range "c_s42_p1"   "bytes=$((C+S42-4))-$((C+S42))"
-_ec_range "c_s42_p1"   "bytes=$((C-1))-$((C+S42))"            # chunk boundary → stripe
+( _ec_range "c_s42_p1"   "bytes=$((C+S42-1))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 2B straddle
+( _ec_range "c_s42_p1"   "bytes=$((C+S42-4))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "c_s42_p1"   "bytes=$((C-1))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # chunk boundary → stripe
 
 # Inside chunk-2: EC2+1 stripe (offset = C+S21)
 info "  EC2+1 stripe   in chunk-2 @ offset $((C+S21))"
-_ec_range "c_s21_p1"   "bytes=$((C+S21-1))-$((C+S21))"       # 2B straddle
-_ec_range "c_s21_p1"   "bytes=$((C+S21-4))-$((C+S21))"
-_ec_range "c_s21_p1"   "bytes=$((C-4))-$((C+S21))"            # wide: chunk boundary → EC2+1 stripe
+( _ec_range "c_s21_p1"   "bytes=$((C+S21-1))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 2B straddle
+( _ec_range "c_s21_p1"   "bytes=$((C+S21-4))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "c_s21_p1"   "bytes=$((C-4))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # wide: chunk boundary → EC2+1 stripe
 
 # Inside chunk-2: EC4+2 stripe-3 (offset = C+3*S42)
 info "  EC4+2 stripe-3 in chunk-2 @ offset $((C+3*S42))"
-_ec_range "c_s42x3_p1" "bytes=$((C+3*S42-1))-$((C+3*S42))"   # 2B straddle
-_ec_range "c_s42x3_p1" "bytes=$((C+3*S42-4))-$((C+3*S42))"
-_ec_range "c_s42x3_p1" "bytes=$((C+S21-4))-$((C+3*S42))"     # EC2+1→EC4+2 within chunk-2
+( _ec_range "c_s42x3_p1" "bytes=$((C+3*S42-1))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))   # 2B straddle
+( _ec_range "c_s42x3_p1" "bytes=$((C+3*S42-4))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "c_s42x3_p1" "bytes=$((C+S21-4))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # EC2+1→EC4+2 within chunk-2
 
 # Large 2-chunk objects: traverse every stripe and chunk boundary in one object
 info "  Large object c2_s42 (${#}B): all boundaries"
-_ec_range "c2_s42"     "bytes=$((S42-1))-$((S42))"            # EC4+2 in chunk-1
-_ec_range "c2_s42"     "bytes=$((3*S42-1))-$((3*S42))"        # EC4+2 stripe-3 in chunk-1
-_ec_range "c2_s42"     "bytes=$((S21-1))-$((S21))"            # EC2+1 in chunk-1
-_ec_range "c2_s42"     "bytes=$((C-1))-$((C))"                # chunk-1 → chunk-2
-_ec_range "c2_s42"     "bytes=$((C+S42-1))-$((C+S42))"        # EC4+2 in chunk-2
-_ec_range "c2_s42"     "bytes=$((C+S21-1))-$((C+S21))"        # EC2+1 in chunk-2
-_ec_range "c2_s42"     "bytes=$((C+3*S42-1))-$((C+3*S42))"   # EC4+2 stripe-3 in chunk-2
-_ec_range "c2_s42"     "bytes=$((2*C-1))-$((2*C+S42-1))"      # chunk-2 → chunk-3 + full stripe
+( _ec_range "c2_s42"     "bytes=$((S42-1))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # EC4+2 in chunk-1
+( _ec_range "c2_s42"     "bytes=$((3*S42-1))-$((3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # EC4+2 stripe-3 in chunk-1
+( _ec_range "c2_s42"     "bytes=$((S21-1))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # EC2+1 in chunk-1
+( _ec_range "c2_s42"     "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                # chunk-1 → chunk-2
+( _ec_range "c2_s42"     "bytes=$((C+S42-1))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # EC4+2 in chunk-2
+( _ec_range "c2_s42"     "bytes=$((C+S21-1))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # EC2+1 in chunk-2
+( _ec_range "c2_s42"     "bytes=$((C+3*S42-1))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))   # EC4+2 stripe-3 in chunk-2
+( _ec_range "c2_s42"     "bytes=$((2*C-1))-$((2*C+S42-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))      # chunk-2 → chunk-3 + full stripe
 
 info "  Large object c2_s21 (${#}B): all boundaries"
-_ec_range "c2_s21"     "bytes=$((S42-1))-$((S42))"
-_ec_range "c2_s21"     "bytes=$((S21-1))-$((S21))"
-_ec_range "c2_s21"     "bytes=$((C-1))-$((C))"                 # chunk boundary
-_ec_range "c2_s21"     "bytes=$((C+S21-1))-$((C+S21))"
-_ec_range "c2_s21"     "bytes=$((2*C-1))-$((2*C+S21-1))"       # chunk-2→3 + entire EC2+1 stripe
-_ec_range "c2_s21"     "bytes=0-$((2*C+S21-1))"                # full object
+( _ec_range "c2_s21"     "bytes=$((S42-1))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "c2_s21"     "bytes=$((S21-1))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "c2_s21"     "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                 # chunk boundary
+( _ec_range "c2_s21"     "bytes=$((C+S21-1))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+( _ec_range "c2_s21"     "bytes=$((2*C-1))-$((2*C+S21-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # chunk-2→3 + entire EC2+1 stripe
+( _ec_range "c2_s21"     "bytes=0-$((2*C+S21-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                # full object
+wait
+collect_results
 
 # ── 8c: uploadPart — part sizes misaligned to EC stripes ─────────────────────
 step_time
