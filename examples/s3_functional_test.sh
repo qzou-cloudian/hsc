@@ -95,7 +95,7 @@ FAILED_TESTS=()   # accumulates every failure message for the end-of-run summary
 FAILED_CMDS=()    # parallel array: rerun command for each failure
 
 # Object sizes to test
-SIZES=("1k" "8k" "64k" "512k" "1m" "8m" "16m" "24m" "32m" "64m")
+SIZES=("1b" "10b" "1k" "8k" "64k" "512k" "1m" "8m" "16m" "24m" "32m" "64m")
 
 echo "========================================="
 echo "S3 Functional Test"
@@ -182,6 +182,7 @@ create_test_file() {
 
     # Convert size to bytes for dd
     case $size in
+        *b) dd if=/dev/random of="$filename" bs=1 count=${size%b} status=none ;;
         *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} status=none ;;
         *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} status=none ;;
     esac
@@ -208,6 +209,7 @@ for size in "${SIZES[@]}"; do
     (
         filename="$TEST_DIR/testfile_${size}.dat"
         case $size in
+            *b) dd if=/dev/random of="$filename" bs=1 count=${size%b} status=none ;;
             *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} status=none ;;
             *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} status=none ;;
         esac
