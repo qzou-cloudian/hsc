@@ -679,6 +679,7 @@ info "  Part sizes 5M / 6M / 7M: none is a multiple of the ${CHUNK_SIZE}-byte st
 mkdir -p "$TEST_DIR/multipart_chunk"
 MPC_SIZES=("5m" "6m" "7m")   # 3 parts each; intentionally misaligned with 4M chunks
 
+# Phase 1: create files and upload all objects in parallel
 _JOB=0
 for part_size in "${MPC_SIZES[@]}"; do
     (
@@ -704,12 +705,24 @@ for part_size in "${MPC_SIZES[@]}"; do
             exit 0
         fi
         echo "PASS:uploadPart full-object integrity verified for $key"
+    ) > "$RESULTS_DIR/job_${_JOB}" &
+    ((_JOB++))
+done
+wait
+collect_results
 
-        # getObjectRange at every storage chunk boundary within the uploaded object
-        num_chunks=$(( (total + C - 1) / C ))
-        for (( ci=1; ci < num_chunks; ci++ )); do
-            boundary=$((ci * C))
-            range="bytes=$((boundary - 4))-$((boundary + 3))"
+# Phase 2: getObjectRange at every chunk boundary — all objects × all boundaries in parallel
+_JOB=0
+for part_size in "${MPC_SIZES[@]}"; do
+    part_bytes=$((${part_size%m} * 1048576))
+    total=$((part_bytes * 3))
+    combined="$TEST_DIR/multipart_chunk/mpc_${part_size}x3.dat"
+    key="mpc_${part_size}x3.dat"
+    num_chunks=$(( (total + C - 1) / C ))
+    for (( ci=1; ci < num_chunks; ci++ )); do
+        boundary=$((ci * C))
+        range="bytes=$((boundary - 4))-$((boundary + 3))"
+        (
             if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
                 echo "INFO:Range check skipped (SSE-C): $key chunk${ci}→$((ci+1)) boundary $range"
             elif $BINARY cmp --range "$range" "$combined" "s3://$BUCKET_NAME/$key" 2>/dev/null; then
@@ -718,9 +731,9 @@ for part_size in "${MPC_SIZES[@]}"; do
                 echo "FAIL:getObjectRange $key chunk${ci}→$((ci+1)) boundary FAILED $range"
                 echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key && \$BINARY cmp --range \"$range\" /tmp/$key s3://\$BUCKET_NAME/$key"
             fi
-        done
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+        ) > "$RESULTS_DIR/job_${_JOB}" &
+        ((_JOB++))
+    done
 done
 wait
 collect_results
@@ -966,6 +979,7 @@ EC_MP_PART_SIZES=($((S42+1))  $((S21+1))  $((3*S42+1))  $((C+S42/2)))
 EC_MP_PART_LABELS=("s42p1x4"  "s21p1x4"   "3s42p1x4"    "c_halfS42x4")
 
 _JOB=0
+# Phase 1: create files and upload all objects in parallel
 for i in "${!EC_MP_PART_LABELS[@]}"; do
     (
         part_bytes=${EC_MP_PART_SIZES[$i]}
@@ -990,15 +1004,28 @@ for i in "${!EC_MP_PART_LABELS[@]}"; do
             exit 0
         fi
         echo "PASS:uploadPart full-object integrity ec_mp_${label}"
+    ) > "$RESULTS_DIR/job_${_JOB}" &
+    ((_JOB++))
+done
+wait
+collect_results
 
-        # getObjectRange at every EC stripe and chunk boundary within this object.
-        # Both stripe sizes are checked; boundaries at or beyond EOF are skipped.
-        for stride in $S42 $S21 $C; do
-            k=1
-            while true; do
-                boundary=$((k * stride))
-                [ "$boundary" -ge "$total" ] && break
-                range="bytes=$((boundary-1))-$((boundary))"
+# Phase 2: getObjectRange at every EC stripe and chunk boundary — all objects × all
+# boundaries dispatched as individual parallel jobs (boundaries at or beyond EOF skipped).
+_JOB=0
+for i in "${!EC_MP_PART_LABELS[@]}"; do
+    part_bytes=${EC_MP_PART_SIZES[$i]}
+    label=${EC_MP_PART_LABELS[$i]}
+    total=$((part_bytes * 4))
+    combined="$TEST_DIR/ec_mp/ec_mp_${label}.dat"
+    key="ec_mp_${label}.dat"
+    for stride in $S42 $S21 $C; do
+        k=1
+        while true; do
+            boundary=$((k * stride))
+            [ "$boundary" -ge "$total" ] && break
+            range="bytes=$((boundary-1))-$((boundary))"
+            (
                 if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
                     echo "INFO:Range check skipped (SSE-C): ec_mp_${label} stride=${stride} @${boundary}"
                 elif $BINARY cmp --range "$range" "$combined" \
@@ -1008,11 +1035,11 @@ for i in "${!EC_MP_PART_LABELS[@]}"; do
                     echo "FAIL:getObjectRange ec_mp_${label} stride=${stride} @${boundary} FAILED"
                     echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key && \$BINARY cmp --range \"$range\" /tmp/$key s3://\$BUCKET_NAME/$key"
                 fi
-                ((k++))
-            done
+            ) > "$RESULTS_DIR/job_${_JOB}" &
+            ((_JOB++))
+            ((k++))
         done
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    done
 done
 wait
 collect_results
