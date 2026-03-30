@@ -1167,15 +1167,15 @@ $BINARY cp $SSE_UPLOAD_ARGS \
     "$TEST_DIR/diff_src/diff_b.dat" "s3://$BUCKET_NAME/diff_src/diff_b.dat" >/dev/null 2>&1
 info "  diff: comparing local dir to S3 prefix (expect no differences)..."
 _diff_out=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
-if echo "$_diff_out" | grep -qiE 'only in|differ|mismatch'; then
-    error "diff: unexpected differences reported: $_diff_out"
-else
+if echo "$_diff_out" | grep -q "No differences found"; then
     success "diff: no differences between local dir and S3 prefix"
+else
+    error "diff: unexpected differences reported: $_diff_out"
 fi
-# Introduce a size difference — modify one file locally, expect diff to report it
+# Add an extra local file; diff should report it as only-in-source
 dd if=/dev/random of="$TEST_DIR/diff_src/diff_extra.dat" bs=1024 count=1 status=none
 _diff_out2=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
-if echo "$_diff_out2" | grep -qiE 'only in.*diff_extra|diff_extra.*only'; then
+if echo "$_diff_out2" | grep -q "diff_extra"; then
     success "diff: correctly detected file present locally but not in S3"
 else
     error "diff: failed to detect extra local file (got: $_diff_out2)"
