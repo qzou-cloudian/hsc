@@ -18,8 +18,9 @@ if [[ -n "$HSC_RDMA" && "$HSC_RDMA" != "false" && "$HSC_RDMA" != "0" ]]; then
         if [[ -d "$_CUOBJ_SRC" ]]; then
             echo "Building libs3_rdma_cuobj.so from $_CUOBJ_SRC ..."
             CUOBJ_ROOT_DIR="${CUOBJ_ROOT_DIR:-/usr/local/cuda}" \
-                cargo build --manifest-path "$_CUOBJ_SRC/Cargo.toml" 2>&1 | tail -3
-            _SO="$_CUOBJ_SRC/target/debug/libs3_rdma_cuobj.so"
+                cargo build --manifest-path "$_CUOBJ_SRC/Cargo.toml" \
+                    --target-dir "./target/cuobj-build" 2>&1 | tail -3
+            _SO="./target/cuobj-build/debug/libs3_rdma_cuobj.so"
             if [[ -f "$_SO" ]]; then
                 cp "$_SO" "./target/debug/"
                 echo "Copied libs3_rdma_cuobj.so → ./target/debug/"
