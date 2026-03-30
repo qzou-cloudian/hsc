@@ -95,7 +95,7 @@ FAILED_TESTS=()   # accumulates every failure message for the end-of-run summary
 FAILED_CMDS=()    # parallel array: rerun command for each failure
 
 # Object sizes to test
-SIZES=("1b" "10b" "1k" "8k" "64k" "512k" "1m" "8m" "16m" "24m" "32m" "64m")
+SIZES=("1b" "2b" "3b" "10b" "1k" "8k" "64k" "512k" "1m" "8m" "16m" "24m" "32m" "64m")
 
 echo "========================================="
 echo "S3 Functional Test"
