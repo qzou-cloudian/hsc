@@ -1081,10 +1081,11 @@ dd if=/dev/random of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 status=none
 # Initial sync: upload all 3 files with --checksum
 info "  sync --checksum: uploading 3 files..."
 # shellcheck disable=SC2086
-if $BINARY sync --checksum $SSE_UPLOAD_ARGS "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
+_sync_out=$($BINARY sync --checksum $SSE_UPLOAD_ARGS "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>&1)
+if [ $? -eq 0 ]; then
     success "sync --checksum: initial sync of 3 files succeeded"
 else
-    error "sync --checksum: initial sync failed"
+    error "sync --checksum: initial sync failed: $_sync_out"
 fi
 
 # Verify all 3 objects are present
