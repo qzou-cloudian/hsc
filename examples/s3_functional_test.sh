@@ -167,19 +167,10 @@ collect_results() {
 }
 
 # SSE-aware full-file comparison (local file vs S3 object).
-# For SSE-C mode (SSE_DOWNLOAD_ARGS non-empty), falls back to downloading
-# the object with the customer key then comparing the two local files.
 _hsc_cmp() {
     local local_file="$1" s3uri="$2"
-    if [[ -z "$SSE_DOWNLOAD_ARGS" ]]; then
-        $BINARY cmp "$local_file" "$s3uri" 2>/dev/null
-    else
-        local tmp; tmp=$(mktemp)
-        # shellcheck disable=SC2086
-        $BINARY cp $SSE_DOWNLOAD_ARGS "$s3uri" "$tmp" >/dev/null 2>&1 \
-            && cmp -s "$local_file" "$tmp"
-        local rc=$?; rm -f "$tmp"; return $rc
-    fi
+    # shellcheck disable=SC2086
+    $BINARY cmp $SSE_DOWNLOAD_ARGS "$local_file" "$s3uri" 2>/dev/null
 }
 
 # Function to create test file
@@ -200,16 +191,12 @@ create_test_file() {
 
 # Step 1: Create bucket
 echo ""
-if [[ -n "$BUCKET_PROVIDED" ]]; then
-    info "Step 1: Using existing bucket '$BUCKET_NAME' (skipping mb)"
+info "Step 1: Creating bucket '$BUCKET_NAME'..."
+if $BINARY mb --ignore-existing "s3://$BUCKET_NAME"; then
+    success "Bucket ready: $BUCKET_NAME"
 else
-    info "Step 1: Creating bucket '$BUCKET_NAME'..."
-    if $BINARY mb "s3://$BUCKET_NAME"; then
-        success "Bucket created successfully"
-    else
-        error "Failed to create bucket"
-        exit 1
-    fi
+    error "Failed to create bucket $BUCKET_NAME"
+    exit 1
 fi
 
 # Step 2: Create test files and upload objects
@@ -229,27 +216,15 @@ done
 wait
 info "All test files created"
 
-# Upload all objects in parallel
-_JOB=0
-for size in "${SIZES[@]}"; do
-    (
-        object_key="testfile_${size}.dat"
-        echo "INFO:Uploading $object_key..."
-        if $BINARY cp $SSE_UPLOAD_ARGS "$TEST_DIR/$object_key" "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Uploaded $object_key"
-        else
-            echo "FAIL:Failed to upload $object_key"
-            case $size in
-                *k) _sz=$((${size%k} * 1024)) ;;
-                *m) _sz=$((${size%m} * 1048576)) ;;
-            esac
-            echo "RERUN:truncate -s $_sz /tmp/$object_key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$object_key s3://\$BUCKET_NAME/$object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-wait
-collect_results
+# Upload all objects at once
+info "Uploading test files to S3..."
+# shellcheck disable=SC2086
+if $BINARY sync $SSE_UPLOAD_ARGS "$TEST_DIR/" "s3://$BUCKET_NAME/" --exclude "*/multipart/*" --exclude "*/chunk_boundary/*" --exclude "*/chunk_downloads/*" --exclude "*/ec/*" --exclude "*/ec_dl/*" --exclude "*/sync_test/*" 2>/dev/null; then
+    success "Uploaded ${#SIZES[@]} test files via sync"
+else
+    error "Failed to upload test files"
+    exit 1
+fi
 
 # List objects to verify
 echo ""
@@ -419,16 +394,12 @@ check_range() {
     local ok_msg=$1 fail_msg=$2 orig=$3 range=$4 s3uri=$5
     local _key="${s3uri##*/}"
     local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
-    # SSE-C: hsc cmp --range does not accept customer keys; skip range check.
-    if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
-        info "Range check skipped (SSE-C): $ok_msg"
-        return 0
-    fi
-    if $BINARY cmp --range "$range" "$orig" "$s3uri" 2>/dev/null; then
+    # shellcheck disable=SC2086
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
         success "$ok_msg"
     else
         error "$fail_msg" \
-            "truncate -s ${_sz} /tmp/${_key} && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/${_key} s3://\$BUCKET_NAME/${_key} && \$BINARY cmp --range \"$range\" /tmp/${_key} s3://\$BUCKET_NAME/${_key}"
+            "truncate -s ${_sz} /tmp/${_key} && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/${_key} s3://\$BUCKET_NAME/${_key} && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/${_key} s3://\$BUCKET_NAME/${_key}"
     fi
 }
 
@@ -438,10 +409,8 @@ verify_range() {
     local range_spec=$2
     local s3_uri=$3
 
-    # SSE-C: skip range check (cmp --range does not accept customer keys).
-    [[ -n "$SSE_DOWNLOAD_ARGS" ]] && return 0
-
-    if $BINARY cmp --range "$range_spec" "$original_file" "$s3_uri" 2>/dev/null; then
+    # shellcheck disable=SC2086
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range_spec" "$original_file" "$s3_uri" 2>/dev/null; then
         return 0
     else
         return 1
@@ -544,26 +513,15 @@ for i in "${!CB_LABELS[@]}"; do
 done
 info "Chunk-boundary test files created (${#CB_LABELS[@]} files)"
 
-# Step 5a: putObject — upload all chunk-boundary files in parallel
+# Step 5a: putObject — upload all chunk-boundary files at once via sync
 echo ""
 info "Step 5a: putObject — uploading chunk-boundary files..."
-_JOB=0
-for i in "${!CB_LABELS[@]}"; do
-    label=${CB_LABELS[$i]}; size=${CB_BYTES[$i]}
-    (
-        echo "INFO:putObject cb_${label} (${size} bytes)..."
-        if $BINARY cp $SSE_UPLOAD_ARGS "$TEST_DIR/chunk_boundary/cb_${label}.dat" \
-                "s3://$BUCKET_NAME/cb_${label}.dat" >/dev/null 2>&1; then
-            echo "PASS:putObject cb_${label} (${size} bytes)"
-        else
-            echo "FAIL:putObject failed for cb_${label}"
-            echo "RERUN:truncate -s ${size} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-wait
-collect_results
+# shellcheck disable=SC2086
+if $BINARY sync $SSE_UPLOAD_ARGS "$TEST_DIR/chunk_boundary/" "s3://$BUCKET_NAME/" 2>/dev/null; then
+    success "putObject: uploaded ${#CB_LABELS[@]} chunk-boundary files"
+else
+    error "putObject: sync failed for chunk-boundary files"
+fi
 
 # Step 5b: getObject — download and byte-verify every chunk-boundary file in parallel
 echo ""
@@ -608,16 +566,12 @@ _cmp_range() {
     local orig="$TEST_DIR/chunk_boundary/cb_${label}.dat"
     local s3uri="s3://$BUCKET_NAME/cb_${label}.dat"
     local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
-    # SSE-C: hsc cmp --range does not accept customer keys; skip range check.
-    if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
-        info "Range check skipped (SSE-C): getObjectRange [cb_${label}] $range"
-        return 0
-    fi
-    if $BINARY cmp --range "$range" "$orig" "$s3uri" 2>/dev/null; then
+    # shellcheck disable=SC2086
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
         success "getObjectRange [cb_${label}] $range"
     else
         error "getObjectRange [cb_${label}] $range — FAILED" \
-              "truncate -s ${_sz} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cmp --range \"$range\" /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
+              "truncate -s ${_sz} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
     fi
 }
 
@@ -821,24 +775,13 @@ done
 wait
 info "EC stripe test files created (${#EC_LABELS[@]} files)"
 
-# Upload all in parallel
-_JOB=0
-for i in "${!EC_LABELS[@]}"; do
-    label=${EC_LABELS[$i]}; size=${EC_BYTES[$i]}
-    (
-        echo "INFO:putObject ec_${label} (${size}B)..."
-        if $BINARY cp $SSE_UPLOAD_ARGS "$TEST_DIR/ec/ec_${label}.dat" \
-                "s3://$BUCKET_NAME/ec_${label}.dat" >/dev/null 2>&1; then
-            echo "PASS:putObject ec_${label} (${size}B)"
-        else
-            echo "FAIL:putObject failed ec_${label} (${size}B)"
-            echo "RERUN:truncate -s ${size} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-wait
-collect_results
+# Upload all via sync
+# shellcheck disable=SC2086
+if $BINARY sync $SSE_UPLOAD_ARGS "$TEST_DIR/ec/" "s3://$BUCKET_NAME/" 2>/dev/null; then
+    success "putObject: uploaded ${#EC_LABELS[@]} EC stripe files"
+else
+    error "putObject: sync failed for EC stripe files"
+fi
 
 # Download + byte-verify all in parallel
 echo ""
@@ -884,16 +827,12 @@ _ec_range() {
     local orig="$TEST_DIR/ec/ec_${label}.dat"
     local s3uri="s3://$BUCKET_NAME/ec_${label}.dat"
     local _sz; _sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
-    # SSE-C: hsc cmp --range does not accept customer keys; skip range check.
-    if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
-        info "Range check skipped (SSE-C): getObjectRange [ec_${label}] $range"
-        return 0
-    fi
-    if $BINARY cmp --range "$range" "$orig" "$s3uri" 2>/dev/null; then
+    # shellcheck disable=SC2086
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
         success "getObjectRange [ec_${label}] $range"
     else
         error "getObjectRange [ec_${label}] $range — FAILED" \
-              "truncate -s ${_sz} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cmp --range \"$range\" /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
+              "truncate -s ${_sz} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
     fi
 }
 
@@ -1263,135 +1202,16 @@ fi
 $BINARY rm "s3://$BUCKET_NAME/$_MV_DST"            >/dev/null 2>&1 || true
 $BINARY rm "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1 || true
 $BINARY rm "s3://$BUCKET_NAME/diff_src/diff_b.dat" >/dev/null 2>&1 || true
-# Restore the mv'd object so Step 9 can delete it cleanly
-$BINARY cp $SSE_UPLOAD_ARGS \
-    "$TEST_DIR/testfile_64k.dat" "s3://$BUCKET_NAME/$_MV_SRC" >/dev/null 2>&1 || true
 
 # Step 9: Delete all objects
 step_time
 echo ""
 info "Step 9: Deleting all objects..."
-_JOB=0
-for size in "${SIZES[@]}"; do
-    (
-        object_key="testfile_${size}.dat"
-        echo "INFO:Deleting $object_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $object_key"
-        else
-            echo "FAIL:Failed to delete $object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete multipart uploaded objects
-for part_size in "${MULTIPART_SIZES[@]}"; do
-    (
-        object_key="multipart_${part_size}_parts.dat"
-        echo "INFO:Deleting $object_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $object_key"
-        else
-            echo "FAIL:Failed to delete $object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete chunk-boundary objects (Steps 5–6)
-for i in "${!CB_LABELS[@]}"; do
-    (
-        object_key="cb_${CB_LABELS[$i]}.dat"
-        echo "INFO:Deleting $object_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $object_key"
-        else
-            echo "FAIL:Failed to delete $object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-for part_size in "${MPC_SIZES[@]}"; do
-    (
-        object_key="mpc_${part_size}x3.dat"
-        echo "INFO:Deleting $object_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $object_key"
-        else
-            echo "FAIL:Failed to delete $object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete copyObject targets (Step 7)
-for dst_key in "${COPY_DSTS[@]}"; do
-    (
-        echo "INFO:Deleting $dst_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$dst_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $dst_key"
-        else
-            echo "FAIL:Failed to delete $dst_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete EC stripe objects (Step 8a)
-for i in "${!EC_LABELS[@]}"; do
-    (
-        object_key="ec_${EC_LABELS[$i]}.dat"
-        echo "INFO:Deleting $object_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $object_key"
-        else
-            echo "FAIL:Failed to delete $object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete uploadPart EC objects (Step 8c)
-for lbl in "${EC_MP_PART_LABELS[@]}"; do
-    (
-        object_key="ec_mp_${lbl}.dat"
-        echo "INFO:Deleting $object_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $object_key"
-        else
-            echo "FAIL:Failed to delete $object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete copyObject EC targets (Step 8d)
-for dst_key in "${EC_COPY_DSTS[@]}"; do
-    (
-        echo "INFO:Deleting $dst_key..."
-        if $BINARY rm "s3://$BUCKET_NAME/$dst_key" >/dev/null 2>&1; then
-            echo "PASS:Deleted $dst_key"
-        else
-            echo "FAIL:Failed to delete $dst_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
-done
-
-# Delete SSE-C validation object (Step 8e)
-(
-    echo "INFO:Deleting $_SSEC_OBJ..."
-    if $BINARY rm "s3://$BUCKET_NAME/$_SSEC_OBJ" >/dev/null 2>&1; then
-        echo "PASS:Deleted $_SSEC_OBJ"
-    else
-        echo "INFO:$_SSEC_OBJ already absent or delete skipped"
-    fi
-) > "$RESULTS_DIR/job_${_JOB}" &
-((_JOB++))
-
-wait
-collect_results
+if $BINARY rm --recursive "s3://$BUCKET_NAME/" >/dev/null 2>&1; then
+    success "Deleted all objects"
+else
+    error "Failed to delete all objects"
+fi
 
 # Verify bucket is empty
 echo ""

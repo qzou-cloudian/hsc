@@ -1,3 +1,4 @@
+use crate::commands::cp::sse_c_key_md5;
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
 use std::path::Path;
@@ -23,6 +24,8 @@ pub async fn cmp(
     range: Option<String>,
     offset: Option<u64>,
     size: Option<u64>,
+    sse_c: Option<String>,
+    sse_c_key: Option<String>,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if range.is_some() && (offset.is_some() || size.is_some()) {
@@ -36,6 +39,8 @@ pub async fn cmp(
         path1,
         start,
         limit,
+        sse_c.as_deref(),
+        sse_c_key.as_deref(),
         #[cfg(feature = "rdma")]
         rdma.as_ref().map(Arc::clone),
     )
@@ -45,6 +50,8 @@ pub async fn cmp(
         path2,
         start,
         limit,
+        sse_c.as_deref(),
+        sse_c_key.as_deref(),
         #[cfg(feature = "rdma")]
         rdma,
     )
@@ -170,6 +177,8 @@ async fn open_reader(
     path: &str,
     start: Option<u64>,
     limit: Option<u64>,
+    sse_c: Option<&str>,
+    sse_c_key: Option<&str>,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<Reader, Box<dyn std::error::Error>> {
     match parse_path(path)? {
@@ -196,10 +205,15 @@ async fn open_reader(
             }
 
             // HEAD to get total size
-            let head = client
-                .head_object()
-                .bucket(&bucket)
-                .key(&key)
+            let mut head_req = client.head_object().bucket(&bucket).key(&key);
+            if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
+                let md5 = sse_c_key_md5(key_b64)?;
+                head_req = head_req
+                    .sse_customer_algorithm(algo)
+                    .sse_customer_key(key_b64)
+                    .sse_customer_key_md5(md5);
+            }
+            let head = head_req
                 .send()
                 .await
                 .map_err(|e| format!("Cannot stat s3://{}/{}: {}", bucket, key, e))?;
@@ -270,6 +284,13 @@ async fn open_reader(
             let mut req = client.get_object().bucket(&bucket).key(&key);
             if let Some(r) = range_hdr {
                 req = req.range(r);
+            }
+            if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
+                let md5 = sse_c_key_md5(key_b64)?;
+                req = req
+                    .sse_customer_algorithm(algo)
+                    .sse_customer_key(key_b64)
+                    .sse_customer_key_md5(md5);
             }
             let resp = req.send().await?;
             let bytes = resp.body.collect().await?.into_bytes().to_vec();

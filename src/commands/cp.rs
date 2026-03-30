@@ -39,7 +39,7 @@ pub struct SseConfig {
 }
 
 /// Compute `base64(MD5(raw_key_bytes))` required by S3 for SSE-C requests.
-fn sse_c_key_md5(key_b64: &str) -> Result<String, Box<dyn std::error::Error>> {
+pub(crate) fn sse_c_key_md5(key_b64: &str) -> Result<String, Box<dyn std::error::Error>> {
     use md5::{Digest, Md5};
     let raw = STANDARD.decode(key_b64)?;
     let digest = Md5::digest(&raw);

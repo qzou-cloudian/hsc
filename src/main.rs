@@ -275,6 +275,12 @@ enum Commands {
         /// Number of bytes to compare (used with --offset)
         #[arg(long)]
         size: Option<u64>,
+        /// SSE-C algorithm for S3 objects (AES256)
+        #[arg(long)]
+        sse_c: Option<String>,
+        /// SSE-C customer key (base64-encoded 32-byte AES key)
+        #[arg(long)]
+        sse_c_key: Option<String>,
     },
 }
 
@@ -509,6 +515,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             range,
             offset,
             size,
+            sse_c,
+            sse_c_key,
         } => {
             commands::cmp::cmp(
                 &client,
@@ -517,6 +525,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 range,
                 offset,
                 size,
+                sse_c,
+                sse_c_key,
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
