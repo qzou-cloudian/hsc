@@ -1080,14 +1080,15 @@ dd if=/dev/random of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 status=none
 
 # Initial sync: upload all 3 files with --checksum
 info "  sync --checksum: uploading 3 files..."
-if $BINARY sync --checksum "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
+# shellcheck disable=SC2086
+if $BINARY sync --checksum $SSE_UPLOAD_ARGS "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
     success "sync --checksum: initial sync of 3 files succeeded"
 else
     error "sync --checksum: initial sync failed"
 fi
 
 # Verify all 3 objects are present
-_sync_count=$($BINARY ls "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>/dev/null | grep -c 'sync_[abc]\.dat' || echo 0)
+_sync_count=$($BINARY ls "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>/dev/null | grep -c 'sync_[abc]\.dat')
 if [ "$_sync_count" -eq 3 ]; then
     success "sync --checksum: all 3 objects present in S3"
 else
@@ -1097,7 +1098,8 @@ fi
 # Remove one local file and re-sync with --delete
 rm -f "$_SYNC_DIR/sync_b.dat"
 info "  sync --delete: removed sync_b.dat locally, re-syncing..."
-if $BINARY sync --delete "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
+# shellcheck disable=SC2086
+if $BINARY sync --delete $SSE_UPLOAD_ARGS "$_SYNC_DIR/" "s3://$BUCKET_NAME/$_SYNC_PREFIX/" >/dev/null 2>&1; then
     success "sync --delete: re-sync succeeded"
 else
     error "sync --delete: re-sync failed"
@@ -1111,7 +1113,7 @@ else
 fi
 
 # Verify sync_a.dat and sync_c.dat are still present
-_sync_remaining=$($BINARY ls "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>/dev/null | grep -c 'sync_[ac]\.dat' || echo 0)
+_sync_remaining=$($BINARY ls "s3://$BUCKET_NAME/$_SYNC_PREFIX/" 2>/dev/null | grep -c 'sync_[ac]\.dat')
 if [ "$_sync_remaining" -eq 2 ]; then
     success "sync --delete: remaining 2 objects (sync_a, sync_c) intact"
 else

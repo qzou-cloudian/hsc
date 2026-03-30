@@ -196,7 +196,6 @@ async fn copy_single(
 ///
 /// Returns `(algorithm_name, base64_value)` when checksum mode is enabled,
 /// or `(None, None)` when checksums are not requested.
-#[cfg(feature = "rdma")]
 fn compute_put_checksum(
     data: &[u8],
     checksum_mode: Option<&ChecksumMode>,
@@ -233,6 +232,8 @@ fn compute_put_checksum(
     let encoded = STANDARD.encode(&bytes);
     (Some(name.to_string()), Some(encoded))
 }
+
+
 
 /// Upload a file to S3
 #[allow(clippy::too_many_arguments)]
@@ -343,11 +344,32 @@ pub async fn upload_file(
             return Ok(());
         }
 
-        let body = ByteStream::from_path(Path::new(local_path)).await?;
-        let mut request = client.put_object().bucket(bucket).key(key).body(body);
+        let body;
+        let mut request;
         if checksum_mode.is_some() {
-            request =
-                request.checksum_algorithm(checksum_algorithm.unwrap_or(ChecksumAlgorithm::Crc32));
+            // Buffer the file so we can pre-compute the checksum as a plain
+            // request header.  Using checksum_algorithm() on a streaming body
+            // causes the SDK to use aws-chunked/trailing-checksum encoding,
+            // which many S3-compatible servers do not support.
+            let bytes = tokio::fs::read(local_path).await?;
+            let (algo_name, cksum_val) =
+                compute_put_checksum(&bytes, checksum_mode.as_ref(), checksum_algorithm.as_ref());
+            body = ByteStream::from(bytes);
+            request = client
+                .put_object()
+                .bucket(bucket)
+                .key(key)
+                .body(body);
+            match (algo_name.as_deref(), cksum_val) {
+                (Some("CRC32"), Some(v))   => request = request.checksum_crc32(v),
+                (Some("CRC32C"), Some(v))  => request = request.checksum_crc32_c(v),
+                (Some("SHA1"), Some(v))    => request = request.checksum_sha1(v),
+                (Some("SHA256"), Some(v))  => request = request.checksum_sha256(v),
+                _ => {}
+            }
+        } else {
+            body = ByteStream::from_path(Path::new(local_path)).await?;
+            request = client.put_object().bucket(bucket).key(key).body(body);
         }
         if let Some(ref alg) = sse.sse {
             request = request.server_side_encryption(ServerSideEncryption::from(alg.as_str()));
