@@ -17,6 +17,7 @@ const CHUNK_SIZE: usize = 65536; // 64KB read buffer
 
 /// Compare two files or objects byte-by-byte, with optional range/offset/size.
 /// Prints nothing if identical, or the first differing byte offset if different.
+#[allow(clippy::too_many_arguments)]
 pub async fn cmp(
     client: &Client,
     path1: &str,
