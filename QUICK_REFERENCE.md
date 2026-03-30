@@ -86,18 +86,15 @@ aws_secret_access_key = YOUR_SECRET
 ```ini
 [default]
 region = us-east-1
-
-[s3]
-multipart_threshold = 10MB   # Files >= this size use multipart upload
-multipart_chunksize = 5MB    # Size of each part
 ```
 
-CLI flags override config-file settings (apply per command):
+Multipart upload settings (use CLI flags, applied per-command):
 ```bash
 hsc cp large.bin s3://bucket/ --part-size 64m      # 64 MiB threshold + chunk size
 hsc cp small.txt s3://bucket/ --disable-multipart  # Force single PUT (max 5 GiB)
 hsc sync --part-size 32m ./data/ s3://bucket/
 ```
+Default part size: 8 MiB. Accepted suffixes: `k`/`K`, `m`/`M`, `g`/`G`, or plain bytes.
 
 ## Environment Variables
 ```bash
@@ -173,14 +170,9 @@ hsc --no-verify-ssl --endpoint-url https://s3.example.com ls
 
 ### Slow uploads
 ```bash
-# Per-command: override multipart settings with CLI flags
+# Tune multipart per-command with CLI flags
 hsc cp large.bin s3://bucket/ --part-size 16m      # smaller parts = faster start
 hsc sync --part-size 16m ./data/ s3://bucket/
-
-# Or set defaults in ~/.aws/config
-[s3]
-multipart_threshold = 5MB    # Lower threshold for faster multipart
-multipart_chunksize = 5MB    # Adjust chunk size
 ```
 
 ## Getting Help

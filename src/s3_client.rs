@@ -89,8 +89,6 @@ pub struct S3ClientConfig {
     pub profile: Option<String>,
     pub verify_ssl: bool,
     pub debug: bool,
-    pub multipart_threshold: u64,
-    pub multipart_chunksize: u64,
     /// Read timeout in seconds; `None` or `0` means no timeout.
     pub read_timeout_secs: Option<u64>,
     /// Connect timeout in seconds; `None` or `0` means no timeout.
@@ -112,8 +110,6 @@ impl Default for S3ClientConfig {
             profile: None,
             verify_ssl: true,
             debug: false,
-            multipart_threshold: 8388608, // 8MB default
-            multipart_chunksize: 8388608, // 8MB default
             read_timeout_secs: None,
             connect_timeout_secs: None,
             custom_headers: Vec::new(),
@@ -148,22 +144,7 @@ pub async fn create_s3_client(
         .or_else(|| env::var("AWS_PROFILE").ok())
         .unwrap_or_else(|| "default".to_string());
 
-    // Load multipart settings from config file if not already set
-    if config.multipart_threshold == 8388608 && config.multipart_chunksize == 8388608 {
-        if let Ok(settings) = load_multipart_settings(&profile) {
-            config.multipart_threshold = settings.0;
-            config.multipart_chunksize = settings.1;
-
-            if config.debug {
-                eprintln!(
-                    "Debug: Loaded from config - multipart_threshold: {}, multipart_chunksize: {}",
-                    config.multipart_threshold, config.multipart_chunksize
-                );
-            }
-        }
-    }
-
-    // RDMA settings are now resolved by the caller (via resolve_rdma_settings) so
+    // RDMA settings are now resolved by the caller
     // they are visible before the config is cloned for provider creation.
 
     // Set up AWS config loader with proper behavior version
@@ -295,46 +276,6 @@ pub async fn create_s3_client(
     Ok(client)
 }
 
-/// Load multipart settings from AWS config file
-/// Returns (threshold, chunksize) from [s3] section
-fn load_multipart_settings(profile: &str) -> Result<(u64, u64), Box<dyn std::error::Error>> {
-    let content = read_aws_config_file()?;
-    let mut in_profile_section = false;
-    let mut in_s3_section = false;
-    let mut threshold: Option<u64> = None;
-    let mut chunksize: Option<u64> = None;
-
-    let profile_header = profile_section_header(profile);
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('[') && line.ends_with(']') {
-            in_profile_section = line == profile_header;
-            in_s3_section = line == "[s3]";
-            continue;
-        }
-        if in_profile_section || in_s3_section {
-            if let Some((key, value)) = line.split_once('=') {
-                match key.trim() {
-                    "multipart_threshold" => {
-                        if let Ok(val) = parse_size_value(value.trim()) {
-                            threshold = Some(val);
-                        }
-                    }
-                    "multipart_chunksize" => {
-                        if let Ok(val) = parse_size_value(value.trim()) {
-                            chunksize = Some(val);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
-    Ok((threshold.unwrap_or(8388608), chunksize.unwrap_or(8388608)))
-}
-
 /// Resolve RDMA settings onto `config` from env vars and the AWS config file.
 ///
 /// Must be called before cloning the config for provider creation.
@@ -404,36 +345,6 @@ fn load_rdma_settings(profile: &str) -> Option<String> {
     }
 
     result
-}
-
-/// Parse size value from config (e.g., "8MB", "10485760", "5M")
-fn parse_size_value(value: &str) -> Result<u64, Box<dyn std::error::Error>> {
-    let value = value.to_uppercase();
-
-    // Try to parse as plain number first
-    if let Ok(num) = value.parse::<u64>() {
-        return Ok(num);
-    }
-
-    // Parse with suffix (MB, M, KB, K, GB, G)
-    let (num_str, multiplier) = if value.ends_with("MB") {
-        (&value[..value.len() - 2], 1024 * 1024)
-    } else if value.ends_with("M") {
-        (&value[..value.len() - 1], 1024 * 1024)
-    } else if value.ends_with("KB") {
-        (&value[..value.len() - 2], 1024)
-    } else if value.ends_with("K") {
-        (&value[..value.len() - 1], 1024)
-    } else if value.ends_with("GB") {
-        (&value[..value.len() - 2], 1024 * 1024 * 1024)
-    } else if value.ends_with("G") {
-        (&value[..value.len() - 1], 1024 * 1024 * 1024)
-    } else {
-        return Err("Invalid size format".into());
-    };
-
-    let num = num_str.trim().parse::<u64>()?;
-    Ok(num * multiplier)
 }
 
 /// Read the AWS config file contents.  Returns an error when the file is absent.

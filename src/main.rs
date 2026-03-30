@@ -324,20 +324,21 @@ fn parse_size(s: &str) -> Result<u64, String> {
     Ok(base * mult)
 }
 
-/// Resolve effective multipart threshold and chunk size from CLI flags and config defaults.
+/// Default multipart threshold and chunk size (8 MiB).
+const DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
+
+/// Resolve effective multipart threshold and chunk size from CLI flags.
 fn resolve_multipart(
     disable_multipart: bool,
     part_size: Option<String>,
-    default_threshold: u64,
-    default_chunksize: u64,
 ) -> Result<(u64, u64), Box<dyn std::error::Error>> {
     if disable_multipart {
-        Ok((u64::MAX, default_chunksize))
+        Ok((u64::MAX, DEFAULT_PART_SIZE))
     } else if let Some(s) = part_size {
         let size = parse_size(&s)?;
         Ok((size, size))
     } else {
-        Ok((default_threshold, default_chunksize))
+        Ok((DEFAULT_PART_SIZE, DEFAULT_PART_SIZE))
     }
 }
 
@@ -376,8 +377,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         profile: cli.profile,
         verify_ssl: !cli.no_verify_ssl,
         debug,
-        multipart_threshold: 8388608, // Will be loaded from config
-        multipart_chunksize: 8388608, // Will be loaded from config
         read_timeout_secs: cli.cli_read_timeout,
         connect_timeout_secs: cli.cli_connect_timeout,
         custom_headers: cli.custom_header,
@@ -439,12 +438,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
-            let (threshold, chunksize) = resolve_multipart(
-                disable_multipart,
-                part_size,
-                client_config_clone.multipart_threshold,
-                client_config_clone.multipart_chunksize,
-            )?;
+            let (threshold, chunksize) = resolve_multipart(disable_multipart, part_size)?;
             commands::cp::copy(
                 &client,
                 &source,
@@ -485,12 +479,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
-            let (threshold, chunksize) = resolve_multipart(
-                disable_multipart,
-                part_size,
-                client_config_clone.multipart_threshold,
-                client_config_clone.multipart_chunksize,
-            )?;
+            let (threshold, chunksize) = resolve_multipart(disable_multipart, part_size)?;
             commands::sync::sync(
                 &client,
                 &source,
@@ -530,12 +519,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sse_c_copy_source,
                 sse_c_copy_source_key,
             };
-            let (threshold, chunksize) = resolve_multipart(
-                disable_multipart,
-                part_size,
-                client_config_clone.multipart_threshold,
-                client_config_clone.multipart_chunksize,
-            )?;
+            let (threshold, chunksize) = resolve_multipart(disable_multipart, part_size)?;
             commands::mv::move_files(
                 &client,
                 &source,
