@@ -578,6 +578,11 @@ async fn upload_file_multipart(
                 } else {
                     // RDMA token unavailable — fall back to plain HTTP body.
                     let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
+                    let (algo_name, cksum_val) = compute_put_checksum(
+                        &body,
+                        checksum_mode.as_ref(),
+                        checksum_algorithm.as_ref(),
+                    );
                     let mut req = client
                         .upload_part()
                         .bucket(bucket)
@@ -585,8 +590,12 @@ async fn upload_file_multipart(
                         .upload_id(upload_id)
                         .part_number(part_number)
                         .body(ByteStream::from(body));
-                    if checksum_mode.is_some() {
-                        req = req.checksum_algorithm(effective_algo.clone());
+                    match (algo_name.as_deref(), cksum_val) {
+                        (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v),
+                        (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v),
+                        (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v),
+                        (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v),
+                        _ => {}
                     }
                     if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
                         let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
@@ -607,17 +616,26 @@ async fn upload_file_multipart(
                 }
                 resp
             } else {
+                let body_data: Vec<u8> = part_data
+                    .ok_or("Internal error: part buffer missing on non-RDMA path")?;
+                let (algo_name, cksum_val) = compute_put_checksum(
+                    &body_data,
+                    checksum_mode.as_ref(),
+                    checksum_algorithm.as_ref(),
+                );
                 let mut req = client
                     .upload_part()
                     .bucket(bucket)
                     .key(key)
                     .upload_id(upload_id)
                     .part_number(part_number)
-                    .body(ByteStream::from(part_data.ok_or(
-                        "Internal error: part buffer missing on non-RDMA path",
-                    )?));
-                if checksum_mode.is_some() {
-                    req = req.checksum_algorithm(effective_algo.clone());
+                    .body(ByteStream::from(body_data));
+                match (algo_name.as_deref(), cksum_val) {
+                    (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v),
+                    (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v),
+                    (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v),
+                    (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v),
+                    _ => {}
                 }
                 if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
                     let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
@@ -632,6 +650,11 @@ async fn upload_file_multipart(
         };
         #[cfg(not(feature = "rdma"))]
         let upload_part_response = {
+            let (algo_name, cksum_val) = compute_put_checksum(
+                &buffer,
+                checksum_mode.as_ref(),
+                checksum_algorithm.as_ref(),
+            );
             let mut req = client
                 .upload_part()
                 .bucket(bucket)
@@ -639,8 +662,12 @@ async fn upload_file_multipart(
                 .upload_id(upload_id)
                 .part_number(part_number)
                 .body(ByteStream::from(buffer));
-            if checksum_mode.is_some() {
-                req = req.checksum_algorithm(effective_algo.clone());
+            match (algo_name.as_deref(), cksum_val) {
+                (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v),
+                (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v),
+                (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v),
+                (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v),
+                _ => {}
             }
             if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
                 let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
