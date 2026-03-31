@@ -58,13 +58,30 @@ impl Intercept for NoSignRequestInterceptor {
 /// Interceptor that injects user-supplied headers into every outgoing request.
 /// Used when `--custom-header KEY:VALUE` is specified.
 ///
-/// `x-amz-meta-*` headers are intentionally skipped for `UploadPart` and
-/// `CompleteMultipartUpload` (detected by `partNumber=` / `uploadId=` query
-/// params): S3 only accepts user metadata on object-creation requests
-/// (`PutObject`, `CreateMultipartUpload`) and rejects it elsewhere.
+/// Several header families are only valid on object-creation requests
+/// (`PutObject`, `CreateMultipartUpload`) and are intentionally skipped for
+/// `UploadPart` and `CompleteMultipartUpload` (detected by `partNumber=` /
+/// `uploadId=` query params).  Sending them on part requests results in S3
+/// errors such as "Metadata cannot be specified in this context."  The
+/// filtered families are:
+///
+/// * `x-amz-meta-*`   — user-defined object metadata
+/// * `x-amz-acl`      — canned ACL
+/// * `x-amz-grant-*`  — explicit ACL grants
+/// * `x-amz-tagging`  — object tags
 #[derive(Debug)]
 struct CustomHeadersInterceptor {
     headers: Vec<(String, String)>,
+}
+
+/// Returns true when the header should be skipped for `UploadPart` /
+/// `CompleteMultipartUpload` requests.
+fn is_object_creation_only_header(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower.starts_with("x-amz-meta-")
+        || lower == "x-amz-acl"
+        || lower.starts_with("x-amz-grant-")
+        || lower == "x-amz-tagging"
 }
 
 impl Intercept for CustomHeadersInterceptor {
@@ -79,11 +96,6 @@ impl Intercept for CustomHeadersInterceptor {
         _cfg: &mut ConfigBag,
     ) -> Result<(), BoxError> {
         let req = context.request_mut();
-        // x-amz-meta-* headers are only valid on object-creation requests
-        // (PutObject, CreateMultipartUpload). UploadPart and
-        // CompleteMultipartUpload carry partNumber/uploadId query params and
-        // reject metadata headers with "Metadata cannot be specified in this
-        // context."
         let has_upload_params = req
             .uri()
             .split_once('?')
@@ -94,7 +106,7 @@ impl Intercept for CustomHeadersInterceptor {
             })
             .unwrap_or(false);
         for (key, value) in &self.headers {
-            if has_upload_params && key.to_lowercase().starts_with("x-amz-meta-") {
+            if has_upload_params && is_object_creation_only_header(key) {
                 continue;
             }
             req.headers_mut().append(key.clone(), value.clone());
