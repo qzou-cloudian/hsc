@@ -325,15 +325,10 @@ for size in "${SIZES[@]}"; do
         object_key="testfile_${size}.dat"
         download_file="$TEST_DIR/downloads/testfile_${size}.dat"
         original_file="$TEST_DIR/testfile_${size}.dat"
-        case $size in
-            *k) _sz=$((${size%k} * 1024)) ;;
-            *m) _sz=$((${size%m} * 1048576)) ;;
-        esac
-
         echo "INFO:Downloading $object_key..."
         if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$object_key" "$download_file" >/dev/null 2>&1; then
             echo "FAIL:Failed to download $object_key"
-            echo "RERUN:truncate -s $_sz /tmp/$object_key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$object_key s3://\$BUCKET_NAME/$object_key && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl"
+            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl"
             exit 0
         fi
 
@@ -342,7 +337,7 @@ for size in "${SIZES[@]}"; do
 
         if [ "$original_size" -ne "$download_size" ]; then
             echo "FAIL:Size mismatch for $object_key (expected: $original_size, got: $download_size)"
-            echo "RERUN:truncate -s $_sz /tmp/$object_key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$object_key s3://\$BUCKET_NAME/$object_key && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl && stat -c%s /tmp/${object_key}_dl"
+            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl && stat -c%s /tmp/${object_key}_dl"
             exit 0
         fi
 
@@ -350,7 +345,7 @@ for size in "${SIZES[@]}"; do
             echo "PASS:Downloaded and verified $object_key (size: $download_size bytes, content: identical)"
         else
             echo "FAIL:Data integrity check failed for $object_key"
-            echo "RERUN:truncate -s $_sz /tmp/$object_key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$object_key s3://\$BUCKET_NAME/$object_key && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl && cmp /tmp/$object_key /tmp/${object_key}_dl"
+            echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/$object_key s3://\$BUCKET_NAME/$object_key"
             exit 0
         fi
 
@@ -1297,22 +1292,29 @@ $BINARY rm "s3://$BUCKET_NAME/diff_src/diff_b.dat" >/dev/null 2>&1 || true
 # Step 9: Delete all objects
 step_time
 echo ""
-info "Step 9: Deleting all objects..."
-if $BINARY rm --recursive "s3://$BUCKET_NAME/" >/dev/null 2>&1; then
-    success "Deleted all objects"
+if [ $ERROR_COUNT -gt 0 ]; then
+    info "Step 9: Skipping object deletion — $ERROR_COUNT test(s) failed"
+    info "  S3 objects preserved at:    s3://$BUCKET_NAME/"
+    info "  Local test files at:        $TEST_DIR"
+    info "  Rerun commands will be written to: ./rerun_failed.sh"
 else
-    error "Failed to delete all objects"
-fi
+    info "Step 9: Deleting all objects..."
+    if $BINARY rm --recursive "s3://$BUCKET_NAME/" >/dev/null 2>&1; then
+        success "Deleted all objects"
+    else
+        error "Failed to delete all objects"
+    fi
 
-# Verify bucket is empty
-echo ""
-info "Verifying bucket is empty..."
-object_count=$($BINARY ls "s3://$BUCKET_NAME" | grep -c "^[0-9]" || true)
-if [ "$object_count" -eq 0 ]; then
-    success "Bucket is empty"
-else
-    error "Bucket still contains $object_count object(s)"
-    $BINARY ls "s3://$BUCKET_NAME"
+    # Verify bucket is empty
+    echo ""
+    info "Verifying bucket is empty..."
+    object_count=$($BINARY ls "s3://$BUCKET_NAME" | grep -c "^[0-9]" || true)
+    if [ "$object_count" -eq 0 ]; then
+        success "Bucket is empty"
+    else
+        error "Bucket still contains $object_count object(s)"
+        $BINARY ls "s3://$BUCKET_NAME"
+    fi
 fi
 
 # Step 10: Delete bucket
@@ -1320,6 +1322,8 @@ step_time
 echo ""
 if [[ -n "$BUCKET_PROVIDED" ]]; then
     info "Step 10: Skipping bucket deletion (bucket '$BUCKET_NAME' was provided by caller)"
+elif [ $ERROR_COUNT -gt 0 ]; then
+    info "Step 10: Skipping bucket deletion — preserving for rerun"
 else
     info "Step 10: Deleting bucket '$BUCKET_NAME'..."
     if $BINARY rb "s3://$BUCKET_NAME"; then
@@ -1331,9 +1335,13 @@ fi
 
 # Cleanup local test files
 echo ""
-info "Cleaning up local test files..."
-rm -rf "$TEST_DIR"
-success "Cleanup complete"
+if [ $ERROR_COUNT -gt 0 ]; then
+    info "Preserving local test files in $TEST_DIR for rerun"
+else
+    info "Cleaning up local test files..."
+    rm -rf "$TEST_DIR"
+    success "Cleanup complete"
+fi
 
 echo ""
 echo "========================================="
@@ -1367,12 +1375,12 @@ else
     {
         echo "#!/bin/bash"
         echo "# Auto-generated rerun script — failed tests from s3_functional_test.sh"
-        echo "# Edit BUCKET_NAME / BINARY below, then: bash rerun_failed.sh"
+        echo "# Edit BUCKET_NAME / BINARY / TEST_DIR below, then: bash rerun_failed.sh"
         echo "BUCKET_NAME=\"\${BUCKET_NAME:-$BUCKET_NAME}\""
         echo "BINARY=\"\${BINARY:-$BINARY}\""
+        echo "TEST_DIR=\"\${TEST_DIR:-$TEST_DIR}\"  # local test files preserved from failed run"
         echo ""
         echo "set +e"
-        echo "\$BINARY mb \"s3://\$BUCKET_NAME\" 2>/dev/null || true"
         echo ""
         for _i in "${!FAILED_TESTS[@]}"; do
             echo "# [$((_i+1))] ${FAILED_TESTS[$_i]}"
