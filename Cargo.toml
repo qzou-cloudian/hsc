@@ -1,6 +1,6 @@
 [package]
 name = "hsc"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["Qingshan <qzou@cloudian.com>"]
 description = "High-performance S3 CLI tool"
