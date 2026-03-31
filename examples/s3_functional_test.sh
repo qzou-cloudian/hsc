@@ -220,6 +220,18 @@ else
     exit 1
 fi
 
+# Delete any leftover objects from a previous failed run
+_existing=$($BINARY ls "s3://$BUCKET_NAME" 2>/dev/null | grep -c "^[0-9]" || true)
+if [ "$_existing" -gt 0 ]; then
+    info "Bucket contains $_existing leftover object(s) — cleaning up before test..."
+    if $BINARY rm --recursive "s3://$BUCKET_NAME/" >/dev/null 2>&1; then
+        success "Bucket cleared"
+    else
+        error "Failed to clear bucket — aborting"
+        exit 1
+    fi
+fi
+
 # Step 2: Create test files and upload objects
 step_time
 echo ""
