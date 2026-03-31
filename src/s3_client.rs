@@ -222,6 +222,14 @@ pub async fn create_s3_client(
     // Build S3-specific config
     let mut s3_config_builder = aws_sdk_s3::config::Builder::from(&aws_config);
 
+    // Do not inject checksums automatically (BehaviorVersion::latest() defaults to
+    // WhenSupported, which adds CRC32C to CreateMultipartUpload even when the caller
+    // did not request a checksum).  S3-compatible servers (e.g. Cloudian) then require
+    // per-part checksums in CompleteMultipartUpload, causing a 400 InvalidRequest.
+    // Set WhenRequired so the SDK only adds checksums when hsc explicitly requests them.
+    s3_config_builder = s3_config_builder
+        .request_checksum_calculation(aws_sdk_s3::config::RequestChecksumCalculation::WhenRequired);
+
     // Set endpoint URL (CLI option > environment)
     let endpoint = config
         .endpoint_url
