@@ -57,6 +57,11 @@ impl Intercept for NoSignRequestInterceptor {
 
 /// Interceptor that injects user-supplied headers into every outgoing request.
 /// Used when `--custom-header KEY:VALUE` is specified.
+///
+/// `x-amz-meta-*` headers are intentionally skipped for `UploadPart` and
+/// `CompleteMultipartUpload` (detected by `partNumber=` / `uploadId=` query
+/// params): S3 only accepts user metadata on object-creation requests
+/// (`PutObject`, `CreateMultipartUpload`) and rejects it elsewhere.
 #[derive(Debug)]
 struct CustomHeadersInterceptor {
     headers: Vec<(String, String)>,
