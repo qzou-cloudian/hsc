@@ -200,11 +200,10 @@ create_test_file() {
 
     info "Creating test file: $filename (size: $size)"
 
-    # Convert size to bytes for dd
     case $size in
-        *b) dd if=/dev/random of="$filename" bs=1 count=${size%b} status=none ;;
-        *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} iflag=fullblock status=none ;;
-        *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} iflag=fullblock status=none ;;
+        *b) truncate -s ${size%b}                     "$filename" ;;
+        *k) truncate -s $((${size%k} * 1024))         "$filename" ;;
+        *m) truncate -s $((${size%m} * 1048576))      "$filename" ;;
     esac
 
     success "Created $filename ($(du -h "$filename" | cut -f1))"
@@ -241,9 +240,9 @@ for size in "${SIZES[@]}"; do
     (
         filename="$TEST_DIR/testfile_${size}.dat"
         case $size in
-            *b) dd if=/dev/random of="$filename" bs=1 count=${size%b} status=none ;;
-            *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} iflag=fullblock status=none ;;
-            *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} iflag=fullblock status=none ;;
+            *b) truncate -s ${size%b}                     "$filename" ;;
+            *k) truncate -s $((${size%k} * 1024))         "$filename" ;;
+            *m) truncate -s $((${size%m} * 1048576))      "$filename" ;;
         esac
     ) &
 done
@@ -287,9 +286,9 @@ for part_size in "${MULTIPART_SIZES[@]}"; do
             16m) count=16 ;;
             32m) count=32 ;;
         esac
-        dd if=/dev/random of="$part1" bs=1048576 count=$count iflag=fullblock status=none &
-        dd if=/dev/random of="$part2" bs=1048576 count=$count iflag=fullblock status=none &
-        dd if=/dev/random of="$part3" bs=1048576 count=$count iflag=fullblock status=none &
+        truncate -s $((count * 1048576)) "$part1" &
+        truncate -s $((count * 1048576)) "$part2" &
+        truncate -s $((count * 1048576)) "$part3" &
         wait
 
         # Combine parts into one file
@@ -1161,10 +1160,10 @@ _SYNC_DIR="$TEST_DIR/sync_test"
 _SYNC_PREFIX="sync_test"
 mkdir -p "$_SYNC_DIR"
 
-# Create 3 small files with random content
-dd if=/dev/random of="$_SYNC_DIR/sync_a.dat" bs=4096  count=1 iflag=fullblock status=none
-dd if=/dev/random of="$_SYNC_DIR/sync_b.dat" bs=8192  count=1 iflag=fullblock status=none
-dd if=/dev/random of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 iflag=fullblock status=none
+# Create 3 small files for sync tests
+truncate -s 4096  "$_SYNC_DIR/sync_a.dat"
+truncate -s 8192  "$_SYNC_DIR/sync_b.dat"
+truncate -s 16384 "$_SYNC_DIR/sync_c.dat"
 
 # Initial sync: upload all 3 files with --checksum
 info "  sync --checksum: uploading 3 files..."
@@ -1247,8 +1246,8 @@ fi
 
 # ── diff: compare local dir to S3 prefix ──────────────────────────────────────
 # Populate diff_src with two files, upload them, then diff — expect no differences.
-dd if=/dev/random of="$TEST_DIR/diff_src/diff_a.dat" bs=4096  count=1 iflag=fullblock status=none
-dd if=/dev/random of="$TEST_DIR/diff_src/diff_b.dat" bs=8192  count=1 iflag=fullblock status=none
+truncate -s 4096 "$TEST_DIR/diff_src/diff_a.dat"
+truncate -s 8192 "$TEST_DIR/diff_src/diff_b.dat"
 $BINARY cp $SSE_UPLOAD_ARGS \
     "$TEST_DIR/diff_src/diff_a.dat" "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1
 $BINARY cp $SSE_UPLOAD_ARGS \
@@ -1261,7 +1260,7 @@ else
     error "diff: unexpected differences reported: $_diff_out"
 fi
 # Add an extra local file; diff should report it as only-in-source
-dd if=/dev/random of="$TEST_DIR/diff_src/diff_extra.dat" bs=1024 count=1 iflag=fullblock status=none
+truncate -s 1024 "$TEST_DIR/diff_src/diff_extra.dat"
 _diff_out2=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
 if echo "$_diff_out2" | grep -q "diff_extra"; then
     success "diff: correctly detected file present locally but not in S3"
