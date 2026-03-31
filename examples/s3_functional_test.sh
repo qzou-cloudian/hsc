@@ -304,13 +304,11 @@ for part_size in "${MULTIPART_SIZES[@]}"; do
                 echo "PASS:Multipart upload integrity verified for $object_key"
             else
                 echo "FAIL:Multipart upload integrity check failed for $object_key"
-                _total_mp=$((count * 3 * 1048576))
-                echo "RERUN:truncate -s $_total_mp /tmp/$object_key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$object_key s3://\$BUCKET_NAME/$object_key && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl && cmp /tmp/$object_key /tmp/${object_key}_dl"
+                echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key"
             fi
         else
             echo "FAIL:Failed to upload $object_key"
-            _total_mp=$((count * 3 * 1048576))
-            echo "RERUN:truncate -s $_total_mp /tmp/$object_key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$object_key s3://\$BUCKET_NAME/$object_key"
+            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key"
         fi
 
         # Clean up part files
@@ -591,20 +589,20 @@ for i in "${!CB_LABELS[@]}"; do
         echo "INFO:getObject cb_${label}..."
         if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/cb_${label}.dat" "$dl" >/dev/null 2>&1; then
             echo "FAIL:getObject failed for cb_${label}"
-            echo "RERUN:truncate -s ${size} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat /tmp/cb_${label}_dl.dat"
+            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat \$TEST_DIR/chunk_downloads/cb_${label}.dat"
             exit 0
         fi
         actual=$(stat -c%s "$dl")
         if [ "$actual" -ne "$size" ]; then
             echo "FAIL:getObject size mismatch cb_${label}: expected ${size}, got ${actual}"
-            echo "RERUN:truncate -s ${size} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat /tmp/cb_${label}_dl.dat && stat -c%s /tmp/cb_${label}_dl.dat"
+            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat \$TEST_DIR/chunk_downloads/cb_${label}.dat && stat -c%s \$TEST_DIR/chunk_downloads/cb_${label}.dat"
             exit 0
         fi
         if $BINARY cmp "$orig" "$dl" 2>/dev/null; then
             echo "PASS:getObject cb_${label} (${size} bytes, content identical)"
         else
             echo "FAIL:getObject data integrity failed for cb_${label}"
-            echo "RERUN:truncate -s ${size} /tmp/cb_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat /tmp/cb_${label}_dl.dat && cmp /tmp/cb_${label}.dat /tmp/cb_${label}_dl.dat"
+            echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/chunk_boundary/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
         fi
     ) > "$RESULTS_DIR/job_${_JOB}" &
     ((_JOB++))
@@ -698,14 +696,14 @@ for part_size in "${MPC_SIZES[@]}"; do
         echo "INFO:uploadPart $key (${total} bytes)..."
         if ! $BINARY cp $SSE_UPLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
             echo "FAIL:uploadPart failed for $key"
-            echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key"
+            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
             exit 0
         fi
         echo "PASS:uploadPart $key (${total} bytes)"
 
         if ! _hsc_cmp "$combined" "s3://$BUCKET_NAME/$key"; then
             echo "FAIL:uploadPart full-object integrity failed for $key"
-            echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$key /tmp/${key}_dl && cmp /tmp/$key /tmp/${key}_dl"
+            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
             exit 0
         fi
         echo "PASS:uploadPart full-object integrity verified for $key"
@@ -763,10 +761,9 @@ for i in "${!COPY_SRCS[@]}"; do
     (
         src=${COPY_SRCS[$i]}; dst=${COPY_DSTS[$i]}; orig=${COPY_ORIGS[$i]}
         echo "INFO:copyObject $src → $dst..."
-        _src_sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
         if ! $BINARY cp $SSE_COPY_ARGS "s3://$BUCKET_NAME/$src" "s3://$BUCKET_NAME/$dst" >/dev/null 2>&1; then
             echo "FAIL:copyObject failed: $src → $dst"
-            echo "RERUN:truncate -s $_src_sz /tmp/$src && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$src s3://\$BUCKET_NAME/$src && \$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
+            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
             exit 0
         fi
         echo "PASS:copyObject $src → $dst"
@@ -777,7 +774,7 @@ for i in "${!COPY_SRCS[@]}"; do
             echo "PASS:copyObject integrity verified: $dst matches $src"
         else
             echo "FAIL:copyObject integrity failed: $dst does not match $src"
-            echo "RERUN:truncate -s $_src_sz /tmp/$src && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$src s3://\$BUCKET_NAME/$src && \$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$dst /tmp/$dst && cmp /tmp/$src /tmp/$dst"
+            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cmp $SSE_DOWNLOAD_ARGS $orig s3://\$BUCKET_NAME/$dst"
         fi
     ) > "$RESULTS_DIR/job_${_JOB}" &
     ((_JOB++))
@@ -866,20 +863,20 @@ for i in "${!EC_LABELS[@]}"; do
         echo "INFO:getObject ec_${label}..."
         if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/ec_${label}.dat" "$dl" >/dev/null 2>&1; then
             echo "FAIL:getObject failed ec_${label}"
-            echo "RERUN:truncate -s ${size} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat /tmp/ec_${label}_dl.dat"
+            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat \$TEST_DIR/ec_dl/ec_${label}.dat"
             exit 0
         fi
         actual=$(stat -c%s "$dl")
         if [ "$actual" -ne "$size" ]; then
             echo "FAIL:getObject size mismatch ec_${label}: expected ${size} got ${actual}"
-            echo "RERUN:truncate -s ${size} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat /tmp/ec_${label}_dl.dat && stat -c%s /tmp/ec_${label}_dl.dat"
+            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat \$TEST_DIR/ec_dl/ec_${label}.dat && stat -c%s \$TEST_DIR/ec_dl/ec_${label}.dat"
             exit 0
         fi
         if $BINARY cmp "$orig" "$dl" 2>/dev/null; then
             echo "PASS:getObject ec_${label} (${size}B content identical)"
         else
             echo "FAIL:getObject data integrity failed ec_${label}"
-            echo "RERUN:truncate -s ${size} /tmp/ec_${label}.dat && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat /tmp/ec_${label}_dl.dat && cmp /tmp/ec_${label}.dat /tmp/ec_${label}_dl.dat"
+            echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/ec/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
         fi
     ) > "$RESULTS_DIR/job_${_JOB}" &
     ((_JOB++))
@@ -996,14 +993,14 @@ for i in "${!EC_MP_PART_LABELS[@]}"; do
 
         if ! $BINARY cp $SSE_UPLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
             echo "FAIL:uploadPart failed ec_mp_${label}"
-            echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key"
+            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
             exit 0
         fi
         echo "PASS:uploadPart ec_mp_${label} (4×${part_bytes}B = ${total}B)"
 
         if ! _hsc_cmp "$combined" "s3://$BUCKET_NAME/$key"; then
             echo "FAIL:uploadPart full-object integrity failed ec_mp_${label}"
-            echo "RERUN:truncate -s $total /tmp/$key && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$key s3://\$BUCKET_NAME/$key && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$key /tmp/${key}_dl && cmp /tmp/$key /tmp/${key}_dl"
+            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
             exit 0
         fi
         echo "PASS:uploadPart full-object integrity ec_mp_${label}"
@@ -1071,10 +1068,9 @@ for i in "${!EC_COPY_SRCS[@]}"; do
     (
         src=${EC_COPY_SRCS[$i]}; dst=${EC_COPY_DSTS[$i]}; orig=${EC_COPY_ORIGS[$i]}
         echo "INFO:copyObject $src → $dst..."
-        _src_sz=$(stat -c%s "$orig" 2>/dev/null || echo 0)
         if ! $BINARY cp $SSE_COPY_ARGS "s3://$BUCKET_NAME/$src" "s3://$BUCKET_NAME/$dst" >/dev/null 2>&1; then
             echo "FAIL:copyObject failed $src → $dst"
-            echo "RERUN:truncate -s $_src_sz /tmp/$src && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$src s3://\$BUCKET_NAME/$src && \$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
+            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
             exit 0
         fi
         echo "PASS:copyObject $src → $dst"
@@ -1084,7 +1080,7 @@ for i in "${!EC_COPY_SRCS[@]}"; do
             echo "PASS:copyObject integrity verified $dst"
         else
             echo "FAIL:copyObject integrity failed $dst"
-            echo "RERUN:truncate -s $_src_sz /tmp/$src && \$BINARY cp $SSE_UPLOAD_ARGS /tmp/$src s3://\$BUCKET_NAME/$src && \$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$dst /tmp/$dst && cmp /tmp/$src /tmp/$dst"
+            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cmp $SSE_DOWNLOAD_ARGS $orig s3://\$BUCKET_NAME/$dst"
         fi
     ) > "$RESULTS_DIR/job_${_JOB}" &
     ((_JOB++))
