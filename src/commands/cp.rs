@@ -244,6 +244,7 @@ fn compute_put_checksum(
 /// checksum value is kept as a fallback for `CompleteMultipartUpload`: some
 /// servers (e.g. RDMA paths with an empty HTTP body) do not echo the
 /// per-part checksum back in the `UploadPart` response.
+#[allow(clippy::too_many_arguments)]
 async fn upload_part_http(
     client: &Client,
     data: Vec<u8>,
