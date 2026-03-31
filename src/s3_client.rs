@@ -82,7 +82,11 @@ impl Intercept for CustomHeadersInterceptor {
         let has_upload_params = req
             .uri()
             .split_once('?')
-            .map(|(_, q)| q.contains("partNumber") || q.contains("uploadId"))
+            .map(|(_, q)| {
+                q.split('&').any(|param| {
+                    param.starts_with("partNumber=") || param.starts_with("uploadId=")
+                })
+            })
             .unwrap_or(false);
         for (key, value) in &self.headers {
             if has_upload_params && key.to_lowercase().starts_with("x-amz-meta-") {

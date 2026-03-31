@@ -233,6 +233,60 @@ fn compute_put_checksum(
     (Some(name.to_string()), Some(encoded))
 }
 
+/// Upload a single multipart part via a plain HTTP body (non-RDMA path).
+///
+/// Computes the checksum over `data` before sending so that the value is set
+/// as a regular request header rather than an aws-chunked trailer.  Trailing
+/// checksums require the server to support `aws-chunked` transfer encoding,
+/// which many S3-compatible servers (including Cloudian) do not.
+///
+/// Returns the SDK response together with the computed checksum value.  The
+/// checksum value is kept as a fallback for `CompleteMultipartUpload`: some
+/// servers (e.g. RDMA paths with an empty HTTP body) do not echo the
+/// per-part checksum back in the `UploadPart` response.
+async fn upload_part_http(
+    client: &Client,
+    data: Vec<u8>,
+    bucket: &str,
+    key: &str,
+    upload_id: &str,
+    part_number: i32,
+    checksum_mode: Option<&ChecksumMode>,
+    checksum_algorithm: Option<&ChecksumAlgorithm>,
+    sse: &SseConfig,
+) -> Result<
+    (
+        aws_sdk_s3::operation::upload_part::UploadPartOutput,
+        Option<String>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    let (algo_name, cksum_val) = compute_put_checksum(&data, checksum_mode, checksum_algorithm);
+    let mut req = client
+        .upload_part()
+        .bucket(bucket)
+        .key(key)
+        .upload_id(upload_id)
+        .part_number(part_number)
+        .body(ByteStream::from(data));
+    match (algo_name.as_deref(), cksum_val.as_deref()) {
+        (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v.to_string()),
+        (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v.to_string()),
+        (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v.to_string()),
+        (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v.to_string()),
+        _ => {}
+    }
+    if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
+        let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
+        req = req.sse_customer_algorithm(algo);
+        if let Some(ref k) = sse.sse_c_key {
+            let md5 = sse_c_key_md5(k)?;
+            req = req.sse_customer_key(k.clone()).sse_customer_key_md5(md5);
+        }
+    }
+    Ok((req.send().await?, cksum_val))
+}
+
 /// Upload a file to S3
 #[allow(clippy::too_many_arguments)]
 pub async fn upload_file(
@@ -528,10 +582,10 @@ async fn upload_file_multipart(
         }
 
         // Upload this part — with RDMA interceptor when a provider is present.
-        // Track the locally computed per-part checksum so we can include it in
-        // CompleteMultipartUpload even when the server doesn't echo it back in
-        // the UploadPart response (e.g. RDMA path with an empty HTTP body).
-        let mut part_cksum_val: Option<String> = None;
+        // part_cksum_val holds the locally computed checksum for CompleteMultipartUpload:
+        // some servers (e.g. empty-body RDMA path) don't echo the checksum in the
+        // UploadPart response, so we keep our own copy as a fallback.
+        let part_cksum_val: Option<String>;
         #[cfg(feature = "rdma")]
         let upload_part_response = {
             if let Some(ref provider) = rdma {
@@ -583,35 +637,12 @@ async fn upload_file_multipart(
                 } else {
                     // RDMA token unavailable — fall back to plain HTTP body.
                     let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
-                    let (algo_name, cksum_val) = compute_put_checksum(
-                        &body,
-                        checksum_mode.as_ref(),
-                        checksum_algorithm.as_ref(),
-                    );
-                    part_cksum_val = cksum_val.clone();
-                    let mut req = client
-                        .upload_part()
-                        .bucket(bucket)
-                        .key(key)
-                        .upload_id(upload_id)
-                        .part_number(part_number)
-                        .body(ByteStream::from(body));
-                    match (algo_name.as_deref(), cksum_val) {
-                        (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v),
-                        (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v),
-                        (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v),
-                        (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v),
-                        _ => {}
-                    }
-                    if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
-                        let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
-                        req = req.sse_customer_algorithm(algo);
-                        if let Some(ref key) = sse.sse_c_key {
-                            let md5 = sse_c_key_md5(key)?;
-                            req = req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
-                        }
-                    }
-                    req.send().await?
+                    let (resp, cksum) = upload_part_http(
+                        client, body, bucket, key, upload_id, part_number,
+                        checksum_mode.as_ref(), checksum_algorithm.as_ref(), sse,
+                    ).await?;
+                    part_cksum_val = cksum;
+                    resp
                 };
 
                 // Deregister the buffer.  If process_reply_token already cleaned
@@ -624,68 +655,22 @@ async fn upload_file_multipart(
             } else {
                 let body_data: Vec<u8> = part_data
                     .ok_or("Internal error: part buffer missing on non-RDMA path")?;
-                let (algo_name, cksum_val) = compute_put_checksum(
-                    &body_data,
-                    checksum_mode.as_ref(),
-                    checksum_algorithm.as_ref(),
-                );
-                part_cksum_val = cksum_val.clone();
-                let mut req = client
-                    .upload_part()
-                    .bucket(bucket)
-                    .key(key)
-                    .upload_id(upload_id)
-                    .part_number(part_number)
-                    .body(ByteStream::from(body_data));
-                match (algo_name.as_deref(), cksum_val) {
-                    (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v),
-                    (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v),
-                    (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v),
-                    (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v),
-                    _ => {}
-                }
-                if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
-                    let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
-                    req = req.sse_customer_algorithm(algo);
-                    if let Some(ref key) = sse.sse_c_key {
-                        let md5 = sse_c_key_md5(key)?;
-                        req = req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
-                    }
-                }
-                req.send().await?
+                let (resp, cksum) = upload_part_http(
+                    client, body_data, bucket, key, upload_id, part_number,
+                    checksum_mode.as_ref(), checksum_algorithm.as_ref(), sse,
+                ).await?;
+                part_cksum_val = cksum;
+                resp
             }
         };
         #[cfg(not(feature = "rdma"))]
         let upload_part_response = {
-            let (algo_name, cksum_val) = compute_put_checksum(
-                &buffer,
-                checksum_mode.as_ref(),
-                checksum_algorithm.as_ref(),
-            );
-            part_cksum_val = cksum_val.clone();
-            let mut req = client
-                .upload_part()
-                .bucket(bucket)
-                .key(key)
-                .upload_id(upload_id)
-                .part_number(part_number)
-                .body(ByteStream::from(buffer));
-            match (algo_name.as_deref(), cksum_val) {
-                (Some("CRC32"), Some(v)) => req = req.checksum_crc32(v),
-                (Some("CRC32C"), Some(v)) => req = req.checksum_crc32_c(v),
-                (Some("SHA1"), Some(v)) => req = req.checksum_sha1(v),
-                (Some("SHA256"), Some(v)) => req = req.checksum_sha256(v),
-                _ => {}
-            }
-            if sse.sse_c.is_some() || sse.sse_c_key.is_some() {
-                let algo = sse.sse_c.clone().unwrap_or_else(|| "AES256".to_string());
-                req = req.sse_customer_algorithm(algo);
-                if let Some(ref key) = sse.sse_c_key {
-                    let md5 = sse_c_key_md5(key)?;
-                    req = req.sse_customer_key(key.clone()).sse_customer_key_md5(md5);
-                }
-            }
-            req.send().await?
+            let (resp, cksum) = upload_part_http(
+                client, buffer, bucket, key, upload_id, part_number,
+                checksum_mode.as_ref(), checksum_algorithm.as_ref(), sse,
+            ).await?;
+            part_cksum_val = cksum;
+            resp
         };
 
         let etag = upload_part_response
