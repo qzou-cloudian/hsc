@@ -528,6 +528,10 @@ async fn upload_file_multipart(
         }
 
         // Upload this part — with RDMA interceptor when a provider is present.
+        // Track the locally computed per-part checksum so we can include it in
+        // CompleteMultipartUpload even when the server doesn't echo it back in
+        // the UploadPart response (e.g. RDMA path with an empty HTTP body).
+        let mut part_cksum_val: Option<String> = None;
         #[cfg(feature = "rdma")]
         let upload_part_response = {
             if let Some(ref provider) = rdma {
@@ -555,6 +559,7 @@ async fn upload_file_multipart(
                         checksum_mode.as_ref(),
                         checksum_algorithm.as_ref(),
                     );
+                    part_cksum_val = cksum_val.clone();
                     let interceptor = RdmaInterceptor::new_put(
                         Arc::clone(provider),
                         token,
@@ -583,6 +588,7 @@ async fn upload_file_multipart(
                         checksum_mode.as_ref(),
                         checksum_algorithm.as_ref(),
                     );
+                    part_cksum_val = cksum_val.clone();
                     let mut req = client
                         .upload_part()
                         .bucket(bucket)
@@ -623,6 +629,7 @@ async fn upload_file_multipart(
                     checksum_mode.as_ref(),
                     checksum_algorithm.as_ref(),
                 );
+                part_cksum_val = cksum_val.clone();
                 let mut req = client
                     .upload_part()
                     .bucket(bucket)
@@ -655,6 +662,7 @@ async fn upload_file_multipart(
                 checksum_mode.as_ref(),
                 checksum_algorithm.as_ref(),
             );
+            part_cksum_val = cksum_val.clone();
             let mut req = client
                 .upload_part()
                 .bucket(bucket)
@@ -689,24 +697,42 @@ async fn upload_file_multipart(
             .part_number(part_number)
             .e_tag(etag);
         if checksum_mode.is_some() {
+            // Use the checksum echoed by the server; fall back to our locally
+            // computed value for servers (e.g. RDMA path) that don't echo it.
             match effective_algo {
                 ChecksumAlgorithm::Crc32 => {
-                    if let Some(v) = upload_part_response.checksum_crc32() {
+                    if let Some(v) = upload_part_response
+                        .checksum_crc32()
+                        .map(|s| s.to_string())
+                        .or(part_cksum_val)
+                    {
                         part_builder = part_builder.checksum_crc32(v);
                     }
                 }
                 ChecksumAlgorithm::Crc32C => {
-                    if let Some(v) = upload_part_response.checksum_crc32_c() {
+                    if let Some(v) = upload_part_response
+                        .checksum_crc32_c()
+                        .map(|s| s.to_string())
+                        .or(part_cksum_val)
+                    {
                         part_builder = part_builder.checksum_crc32_c(v);
                     }
                 }
                 ChecksumAlgorithm::Sha1 => {
-                    if let Some(v) = upload_part_response.checksum_sha1() {
+                    if let Some(v) = upload_part_response
+                        .checksum_sha1()
+                        .map(|s| s.to_string())
+                        .or(part_cksum_val)
+                    {
                         part_builder = part_builder.checksum_sha1(v);
                     }
                 }
                 ChecksumAlgorithm::Sha256 => {
-                    if let Some(v) = upload_part_response.checksum_sha256() {
+                    if let Some(v) = upload_part_response
+                        .checksum_sha256()
+                        .map(|s| s.to_string())
+                        .or(part_cksum_val)
+                    {
                         part_builder = part_builder.checksum_sha256(v);
                     }
                 }
