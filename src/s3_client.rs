@@ -74,7 +74,20 @@ impl Intercept for CustomHeadersInterceptor {
         _cfg: &mut ConfigBag,
     ) -> Result<(), BoxError> {
         let req = context.request_mut();
+        // x-amz-meta-* headers are only valid on object-creation requests
+        // (PutObject, CreateMultipartUpload). UploadPart and
+        // CompleteMultipartUpload carry partNumber/uploadId query params and
+        // reject metadata headers with "Metadata cannot be specified in this
+        // context."
+        let has_upload_params = req
+            .uri()
+            .split_once('?')
+            .map(|(_, q)| q.contains("partNumber") || q.contains("uploadId"))
+            .unwrap_or(false);
         for (key, value) in &self.headers {
+            if has_upload_params && key.to_lowercase().starts_with("x-amz-meta-") {
+                continue;
+            }
             req.headers_mut().append(key.clone(), value.clone());
         }
         Ok(())
