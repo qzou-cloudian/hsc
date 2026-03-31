@@ -1241,6 +1241,9 @@ else
 fi
 
 # ── diff: compare local dir to S3 prefix ──────────────────────────────────────
+# Ensure diff_src is clean (no leftover files from a previous failed run).
+rm -f "$TEST_DIR/diff_src/"*.dat
+$BINARY rm --recursive "s3://$BUCKET_NAME/diff_src/" >/dev/null 2>&1 || true
 # Populate diff_src with two files, upload them, then diff — expect no differences.
 truncate -s 4096 "$TEST_DIR/diff_src/diff_a.dat"
 truncate -s 8192 "$TEST_DIR/diff_src/diff_b.dat"
@@ -1292,9 +1295,8 @@ else
 fi
 
 # Cleanup
-$BINARY rm "s3://$BUCKET_NAME/$_MV_DST"            >/dev/null 2>&1 || true
-$BINARY rm "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1 || true
-$BINARY rm "s3://$BUCKET_NAME/diff_src/diff_b.dat" >/dev/null 2>&1 || true
+$BINARY rm "s3://$BUCKET_NAME/$_MV_DST"                   >/dev/null 2>&1 || true
+$BINARY rm --recursive "s3://$BUCKET_NAME/diff_src/"       >/dev/null 2>&1 || true
 
 # Step 9: Delete all objects
 step_time
