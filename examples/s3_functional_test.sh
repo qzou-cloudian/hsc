@@ -203,8 +203,8 @@ create_test_file() {
     # Convert size to bytes for dd
     case $size in
         *b) dd if=/dev/random of="$filename" bs=1 count=${size%b} status=none ;;
-        *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} status=none ;;
-        *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} status=none ;;
+        *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} iflag=fullblock status=none ;;
+        *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} iflag=fullblock status=none ;;
     esac
 
     success "Created $filename ($(du -h "$filename" | cut -f1))"
@@ -230,8 +230,8 @@ for size in "${SIZES[@]}"; do
         filename="$TEST_DIR/testfile_${size}.dat"
         case $size in
             *b) dd if=/dev/random of="$filename" bs=1 count=${size%b} status=none ;;
-            *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} status=none ;;
-            *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} status=none ;;
+            *k) dd if=/dev/random of="$filename" bs=1024 count=${size%k} iflag=fullblock status=none ;;
+            *m) dd if=/dev/random of="$filename" bs=1048576 count=${size%m} iflag=fullblock status=none ;;
         esac
     ) &
 done
@@ -275,9 +275,9 @@ for part_size in "${MULTIPART_SIZES[@]}"; do
             16m) count=16 ;;
             32m) count=32 ;;
         esac
-        dd if=/dev/random of="$part1" bs=1048576 count=$count status=none &
-        dd if=/dev/random of="$part2" bs=1048576 count=$count status=none &
-        dd if=/dev/random of="$part3" bs=1048576 count=$count status=none &
+        dd if=/dev/random of="$part1" bs=1048576 count=$count iflag=fullblock status=none &
+        dd if=/dev/random of="$part2" bs=1048576 count=$count iflag=fullblock status=none &
+        dd if=/dev/random of="$part3" bs=1048576 count=$count iflag=fullblock status=none &
         wait
 
         # Combine parts into one file
@@ -1099,7 +1099,7 @@ info "Step 8e: SSE-C key validation tests..."
 _SSEC_KEY=$(openssl rand -base64 32)
 _SSEC_WRONG=$(openssl rand -base64 32)
 _SSEC_SIZE=65536
-truncate -s $_SSEC_SIZE "$TEST_DIR/$_SSEC_OBJ" 2>/dev/null || dd if=/dev/random of="$TEST_DIR/$_SSEC_OBJ" bs=$_SSEC_SIZE count=1 status=none
+truncate -s $_SSEC_SIZE "$TEST_DIR/$_SSEC_OBJ" 2>/dev/null || dd if=/dev/random of="$TEST_DIR/$_SSEC_OBJ" bs=$_SSEC_SIZE count=1 iflag=fullblock status=none
 
 # (a) upload with SSE-C key
 if $BINARY cp --sse-c AES256 --sse-c-key "$_SSEC_KEY" \
@@ -1150,9 +1150,9 @@ _SYNC_PREFIX="sync_test"
 mkdir -p "$_SYNC_DIR"
 
 # Create 3 small files with random content
-dd if=/dev/random of="$_SYNC_DIR/sync_a.dat" bs=4096  count=1 status=none
-dd if=/dev/random of="$_SYNC_DIR/sync_b.dat" bs=8192  count=1 status=none
-dd if=/dev/random of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 status=none
+dd if=/dev/random of="$_SYNC_DIR/sync_a.dat" bs=4096  count=1 iflag=fullblock status=none
+dd if=/dev/random of="$_SYNC_DIR/sync_b.dat" bs=8192  count=1 iflag=fullblock status=none
+dd if=/dev/random of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 iflag=fullblock status=none
 
 # Initial sync: upload all 3 files with --checksum
 info "  sync --checksum: uploading 3 files..."
@@ -1235,8 +1235,8 @@ fi
 
 # ── diff: compare local dir to S3 prefix ──────────────────────────────────────
 # Populate diff_src with two files, upload them, then diff — expect no differences.
-dd if=/dev/random of="$TEST_DIR/diff_src/diff_a.dat" bs=4096  count=1 status=none
-dd if=/dev/random of="$TEST_DIR/diff_src/diff_b.dat" bs=8192  count=1 status=none
+dd if=/dev/random of="$TEST_DIR/diff_src/diff_a.dat" bs=4096  count=1 iflag=fullblock status=none
+dd if=/dev/random of="$TEST_DIR/diff_src/diff_b.dat" bs=8192  count=1 iflag=fullblock status=none
 $BINARY cp $SSE_UPLOAD_ARGS \
     "$TEST_DIR/diff_src/diff_a.dat" "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1
 $BINARY cp $SSE_UPLOAD_ARGS \
@@ -1249,7 +1249,7 @@ else
     error "diff: unexpected differences reported: $_diff_out"
 fi
 # Add an extra local file; diff should report it as only-in-source
-dd if=/dev/random of="$TEST_DIR/diff_src/diff_extra.dat" bs=1024 count=1 status=none
+dd if=/dev/random of="$TEST_DIR/diff_src/diff_extra.dat" bs=1024 count=1 iflag=fullblock status=none
 _diff_out2=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
 if echo "$_diff_out2" | grep -q "diff_extra"; then
     success "diff: correctly detected file present locally but not in S3"
