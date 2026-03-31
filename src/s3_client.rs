@@ -100,9 +100,8 @@ impl Intercept for CustomHeadersInterceptor {
             .uri()
             .split_once('?')
             .map(|(_, q)| {
-                q.split('&').any(|param| {
-                    param.starts_with("partNumber=") || param.starts_with("uploadId=")
-                })
+                q.split('&')
+                    .any(|param| param.starts_with("partNumber=") || param.starts_with("uploadId="))
             })
             .unwrap_or(false);
         for (key, value) in &self.headers {

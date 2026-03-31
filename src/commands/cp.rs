@@ -638,9 +638,17 @@ async fn upload_file_multipart(
                     // RDMA token unavailable — fall back to plain HTTP body.
                     let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
                     let (resp, cksum) = upload_part_http(
-                        client, body, bucket, key, upload_id, part_number,
-                        checksum_mode.as_ref(), checksum_algorithm.as_ref(), sse,
-                    ).await?;
+                        client,
+                        body,
+                        bucket,
+                        key,
+                        upload_id,
+                        part_number,
+                        checksum_mode.as_ref(),
+                        checksum_algorithm.as_ref(),
+                        sse,
+                    )
+                    .await?;
                     part_cksum_val = cksum;
                     resp
                 };
@@ -653,12 +661,20 @@ async fn upload_file_multipart(
                 }
                 resp
             } else {
-                let body_data: Vec<u8> = part_data
-                    .ok_or("Internal error: part buffer missing on non-RDMA path")?;
+                let body_data: Vec<u8> =
+                    part_data.ok_or("Internal error: part buffer missing on non-RDMA path")?;
                 let (resp, cksum) = upload_part_http(
-                    client, body_data, bucket, key, upload_id, part_number,
-                    checksum_mode.as_ref(), checksum_algorithm.as_ref(), sse,
-                ).await?;
+                    client,
+                    body_data,
+                    bucket,
+                    key,
+                    upload_id,
+                    part_number,
+                    checksum_mode.as_ref(),
+                    checksum_algorithm.as_ref(),
+                    sse,
+                )
+                .await?;
                 part_cksum_val = cksum;
                 resp
             }
@@ -666,9 +682,17 @@ async fn upload_file_multipart(
         #[cfg(not(feature = "rdma"))]
         let upload_part_response = {
             let (resp, cksum) = upload_part_http(
-                client, buffer, bucket, key, upload_id, part_number,
-                checksum_mode.as_ref(), checksum_algorithm.as_ref(), sse,
-            ).await?;
+                client,
+                buffer,
+                bucket,
+                key,
+                upload_id,
+                part_number,
+                checksum_mode.as_ref(),
+                checksum_algorithm.as_ref(),
+                sse,
+            )
+            .await?;
             part_cksum_val = cksum;
             resp
         };
