@@ -2,6 +2,7 @@ use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
 use crc32fast::Hasher as Crc32Hasher;
 use md5::{Digest, Md5};
+use serde_json::{json, Map, Value};
 use sha1::Sha1;
 use sha2::Sha256;
 use std::path::Path;
@@ -15,6 +16,7 @@ pub async fn stat(
     path: &str,
     recursive: bool,
     checksum: Option<String>,
+    json_output: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path_type = parse_path(path)?;
 
@@ -22,28 +24,76 @@ pub async fn stat(
         PathType::S3 { bucket, key } => {
             if key.is_empty() {
                 if recursive {
-                    // Recursive stat all objects in bucket
-                    stat_s3_recursive(client, &bucket, "").await
+                    if json_output {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &stat_s3_recursive_json(client, &bucket, "").await?
+                            )?
+                        );
+                        Ok(())
+                    } else {
+                        stat_s3_recursive(client, &bucket, "").await
+                    }
+                } else if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &stat_bucket_json(client, &bucket).await?
+                        )?
+                    );
+                    Ok(())
                 } else {
-                    // Bucket stat only
                     stat_bucket(client, &bucket).await
                 }
             } else if recursive {
-                // Recursive S3 object stat with prefix
-                stat_s3_recursive(client, &bucket, &key).await
-            } else {
-                // Single S3 object stat
-                stat_object(client, &bucket, &key).await
-            }
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &stat_s3_recursive_json(client, &bucket, &key).await?
+                        )?
+                    );
+                    Ok(())
+                } else {
+                    stat_s3_recursive(client, &bucket, &key).await
+                }
+            } else if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &stat_object_json(client, &bucket, &key).await?
+                        )?
+                    );
+                    Ok(())
+                } else {
+                    stat_object(client, &bucket, &key).await
+                }
         }
         PathType::Local(local_path) => {
             if recursive {
-                // Recursive local stat
-                stat_local_recursive(&local_path, checksum).await
-            } else {
-                // Single local file/directory stat
-                stat_local(&local_path, checksum).await
-            }
+                if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &stat_local_recursive_json(&local_path, checksum).await?
+                        )?
+                    );
+                    Ok(())
+                } else {
+                    stat_local_recursive(&local_path, checksum).await
+                }
+            } else if json_output {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(
+                            &stat_local_json(&local_path, checksum).await?
+                        )?
+                    );
+                    Ok(())
+                } else {
+                    stat_local(&local_path, checksum).await
+                }
         }
     }
 }
@@ -126,6 +176,68 @@ async fn stat_bucket(client: &Client, bucket: &str) -> Result<(), Box<dyn std::e
     }
 
     Ok(())
+}
+
+async fn stat_bucket_json(
+    client: &Client,
+    bucket: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut out = Map::new();
+    out.insert("name".to_string(), json!(bucket));
+    out.insert("type".to_string(), json!("s3 bucket"));
+
+    client
+        .head_bucket()
+        .bucket(bucket)
+        .send()
+        .await
+        .map_err(|e| {
+            format!(
+                "Bucket '{}' does not exist or is not accessible: {}",
+                bucket, e
+            )
+        })?;
+    out.insert("status".to_string(), json!("exists"));
+
+    if let Ok(location) = client.get_bucket_location().bucket(bucket).send().await {
+        out.insert(
+            "region".to_string(),
+            json!(location
+                .location_constraint()
+                .map(|c| c.as_str())
+                .unwrap_or("us-east-1")),
+        );
+    }
+
+    if let Ok(versioning) = client.get_bucket_versioning().bucket(bucket).send().await {
+        if let Some(status) = versioning.status() {
+            out.insert("versioning".to_string(), json!(status.as_str()));
+        }
+    }
+
+    if client
+        .get_bucket_encryption()
+        .bucket(bucket)
+        .send()
+        .await
+        .is_ok()
+    {
+        out.insert("encryption".to_string(), json!("Enabled"));
+    }
+
+    if let Ok(result) = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .max_keys(1)
+        .send()
+        .await
+    {
+        if let Some(count) = result.key_count() {
+            out.insert("objects".to_string(), json!(count));
+        }
+    }
+
+    Ok(Value::Object(out))
 }
 
 /// Display S3 object information
@@ -214,6 +326,69 @@ async fn stat_object(
     }
 
     Ok(())
+}
+
+async fn stat_object_json(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let response = client
+        .head_object()
+        .bucket(bucket)
+        .key(key)
+        .checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled)
+        .send()
+        .await?;
+
+    let mut out = Map::new();
+    out.insert(
+        "name".to_string(),
+        json!(format!("s3://{}/{}", bucket, key)),
+    );
+    out.insert("type".to_string(), json!("file"));
+    if let Some(size) = response.content_length() {
+        out.insert("size".to_string(), json!(size));
+    }
+    if let Some(last_modified) = response.last_modified() {
+        out.insert("modified".to_string(), json!(last_modified.to_string()));
+    }
+    if let Some(etag) = response.e_tag() {
+        out.insert("etag".to_string(), json!(etag));
+    }
+    if let Some(content_type) = response.content_type() {
+        out.insert("content_type".to_string(), json!(content_type));
+    }
+    if let Some(storage_class) = response.storage_class() {
+        out.insert("storage_class".to_string(), json!(storage_class.as_str()));
+    }
+    if let Some(checksum) = response.checksum_crc32() {
+        out.insert("crc32".to_string(), json!(checksum));
+    }
+    if let Some(checksum) = response.checksum_crc32_c() {
+        out.insert("crc32c".to_string(), json!(checksum));
+    }
+    if let Some(checksum) = response.checksum_sha1() {
+        out.insert("sha1".to_string(), json!(checksum));
+    }
+    if let Some(checksum) = response.checksum_sha256() {
+        out.insert("sha256".to_string(), json!(checksum));
+    }
+    if let Some(sse) = response.server_side_encryption() {
+        out.insert("encryption".to_string(), json!(sse.as_str()));
+    }
+    if let Some(metadata) = response.metadata() {
+        if !metadata.is_empty() {
+            out.insert("metadata".to_string(), serde_json::to_value(metadata)?);
+        }
+    }
+    if let Some(cache_control) = response.cache_control() {
+        out.insert("cache_control".to_string(), json!(cache_control));
+    }
+    if let Some(expires) = response.expires_string() {
+        out.insert("expires".to_string(), json!(expires));
+    }
+    Ok(Value::Object(out))
 }
 
 /// Display local filesystem information (S3-compatible format)
@@ -347,6 +522,72 @@ async fn stat_local(
     Ok(())
 }
 
+async fn stat_local_json(
+    path: &str,
+    checksum: Option<String>,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let normalized_path = path.trim_end_matches('/');
+    let path_obj = Path::new(normalized_path);
+
+    if !path_obj.exists() {
+        return Err(format!("Path '{}' does not exist", normalized_path).into());
+    }
+
+    let metadata = fs::metadata(path_obj).await?;
+    let mut out = Map::new();
+    out.insert("name".to_string(), json!(normalized_path));
+
+    let file_type = if metadata.is_dir() {
+        "directory"
+    } else if metadata.is_symlink() {
+        "symbolic link"
+    } else {
+        "file"
+    };
+    out.insert("type".to_string(), json!(file_type));
+    out.insert("size".to_string(), json!(metadata.len()));
+
+    if let Ok(modified) = metadata.modified() {
+        if let Ok(datetime) = modified.duration_since(std::time::UNIX_EPOCH) {
+            let secs = datetime.as_secs();
+            let dt = chrono::DateTime::from_timestamp(secs as i64, 0)
+                .unwrap_or(chrono::DateTime::UNIX_EPOCH);
+            out.insert(
+                "modified".to_string(),
+                json!(dt.format("%Y-%m-%d %H:%M:%S %Z").to_string()),
+            );
+        }
+    }
+
+    if metadata.is_file() {
+        if let Ok(etag) = calculate_file_md5(path_obj).await {
+            out.insert("etag".to_string(), json!(etag));
+        }
+        out.insert(
+            "content_type".to_string(),
+            json!(detect_content_type(path_obj)),
+        );
+        if checksum.is_some() {
+            insert_requested_checksum(&mut out, path_obj, checksum).await?;
+        }
+    }
+
+    out.insert("storage".to_string(), json!("local"));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mode = metadata.permissions().mode();
+        out.insert("mode".to_string(), json!(format!("{:o}", mode & 0o777)));
+        out.insert("uid".to_string(), json!(metadata.uid()));
+        out.insert("gid".to_string(), json!(metadata.gid()));
+        out.insert("inode".to_string(), json!(metadata.ino()));
+        out.insert("links".to_string(), json!(metadata.nlink()));
+    }
+
+    Ok(Value::Object(out))
+}
+
 /// Calculate MD5 hash of a file (ETag equivalent)
 async fn calculate_file_md5(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let mut file = fs::File::open(path).await?;
@@ -362,6 +603,63 @@ async fn calculate_file_md5(path: &Path) -> Result<String, Box<dyn std::error::E
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn detect_content_type(path_obj: &Path) -> &'static str {
+    match path_obj.extension().and_then(|e| e.to_str()) {
+        Some("txt") => "text/plain",
+        Some("html") | Some("htm") => "text/html",
+        Some("json") => "application/json",
+        Some("xml") => "application/xml",
+        Some("pdf") => "application/pdf",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("zip") => "application/zip",
+        Some("tar") => "application/x-tar",
+        Some("gz") => "application/gzip",
+        _ => "application/octet-stream",
+    }
+}
+
+async fn insert_requested_checksum(
+    out: &mut Map<String, Value>,
+    path_obj: &Path,
+    checksum: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match checksum.as_deref().map(|s| s.to_uppercase()).as_deref() {
+        Some("CRC32") => {
+            out.insert(
+                "crc32".to_string(),
+                json!(calculate_file_crc32(path_obj).await?),
+            );
+        }
+        Some("CRC32C") => {
+            out.insert(
+                "crc32c".to_string(),
+                json!(calculate_file_crc32(path_obj).await?),
+            );
+        }
+        Some("SHA1") => {
+            out.insert(
+                "sha1".to_string(),
+                json!(calculate_file_sha1(path_obj).await?),
+            );
+        }
+        Some("SHA256") => {
+            out.insert(
+                "sha256".to_string(),
+                json!(calculate_file_sha256(path_obj).await?),
+            );
+        }
+        _ => {
+            out.insert(
+                "sha256".to_string(),
+                json!(calculate_file_sha256(path_obj).await?),
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Calculate CRC32 checksum of a file
@@ -450,6 +748,38 @@ async fn stat_local_recursive(
     Ok(())
 }
 
+async fn stat_local_recursive_json(
+    path: &str,
+    checksum: Option<String>,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let path_obj = Path::new(path);
+
+    if !path_obj.exists() {
+        return Err(format!("Path '{}' does not exist", path).into());
+    }
+
+    if !path_obj.is_dir() {
+        return Ok(vec![stat_local_json(path, checksum).await?]);
+    }
+
+    let mut entries = Vec::new();
+    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
+        let entry_path = entry.path();
+        if entry_path.is_file() {
+            entries.push(
+                stat_local_json(
+                    entry_path.to_str().ok_or_else(|| {
+                        format!("path contains invalid UTF-8: {}", entry_path.display())
+                    })?,
+                    checksum.clone(),
+                )
+                .await?,
+            );
+        }
+    }
+    Ok(entries)
+}
+
 /// Stat S3 objects recursively
 async fn stat_s3_recursive(
     client: &Client,
@@ -486,4 +816,41 @@ async fn stat_s3_recursive(
     }
 
     Ok(())
+}
+
+async fn stat_s3_recursive_json(
+    client: &Client,
+    bucket: &str,
+    prefix: &str,
+) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
+    let mut continuation_token: Option<String> = None;
+    let mut entries = Vec::new();
+
+    loop {
+        let mut request = client.list_objects_v2().bucket(bucket);
+
+        if !prefix.is_empty() {
+            request = request.prefix(prefix);
+        }
+
+        if let Some(token) = continuation_token {
+            request = request.continuation_token(token);
+        }
+
+        let response = request.send().await?;
+
+        for obj in response.contents() {
+            if let Some(key) = obj.key() {
+                entries.push(stat_object_json(client, bucket, key).await?);
+            }
+        }
+
+        if response.is_truncated() == Some(true) {
+            continuation_token = response.next_continuation_token().map(|s| s.to_string());
+        } else {
+            break;
+        }
+    }
+
+    Ok(entries)
 }

@@ -38,14 +38,17 @@ if [[ -n "$HSC_RDMA" && "$HSC_RDMA" != "false" && "$HSC_RDMA" != "0" ]]; then
 else
     BINARY="./target/debug/hsc"
 fi
+if [[ ! -f "$BINARY" ]]; then
+    BINARY="hsc"
+fi
 
 # SSE configuration — set HSC_SSE to enable server-side encryption for all tests.
 #
 #   AES256    — S3-managed AES-256 (transparent to reads; all tests work normally)
 #   aws:kms   — AWS KMS encryption (set HSC_SSE_KMS_KEY_ID for a specific key)
 #   sse-c     — Customer-provided AES-256 key (set HSC_SSE_C_KEY or auto-generated;
-#               'hsc cmp --range' does not yet accept SSE-C keys so range-verification
-#               steps are skipped in this mode)
+#               'hsc cmp --range' supports SSE-C keys; range-verification steps are
+#               skipped in this mode when SSE_DOWNLOAD_ARGS contains a key)
 #
 # Examples:
 #   HSC_SSE=AES256 ./examples/s3_functional_test.sh
@@ -98,9 +101,6 @@ ENDPOINT="${AWS_ENDPOINT_URL}"
 BUCKET_NAME="${1:-test-bucket-$(date +%s)}"
 BUCKET_PROVIDED="${1:+true}"   # non-empty when caller supplied a bucket name
 TEST_DIR="./test_data"
-RESULTS_DIR=$(mktemp -d)
-trap 'rm -rf "$RESULTS_DIR"' EXIT
-
 # Colors for output
 GREEN='\033[0;32m'
 RED='\033[0;31m'
@@ -162,37 +162,6 @@ step_time() {
     STEP_START=$SECONDS
 }
 
-# Collect PASS:/FAIL:/INFO:/RERUN: lines written by parallel subshells to per-job files.
-# Each FAIL: line may be immediately followed by a RERUN: line that carries the
-# reproduce command; collect_results attaches it to the most recent failure entry.
-collect_results() {
-    for f in "$RESULTS_DIR"/job_*; do
-        [ -f "$f" ] || continue
-        while IFS= read -r line; do
-            case "$line" in
-                PASS:*) success "${line#PASS:}" ;;
-                FAIL:*) error "${line#FAIL:}" ;;
-                RERUN:*)
-                    # Attach to the last recorded failure (parallel array index)
-                    if [ ${#FAILED_TESTS[@]} -gt 0 ]; then
-                        FAILED_CMDS[$(( ${#FAILED_TESTS[@]} - 1 ))]="${line#RERUN:}"
-                    fi
-                    ;;
-                INFO:*) info "${line#INFO:}" ;;
-                *) echo "$line" ;;
-            esac
-        done < "$f"
-    done
-    rm -f "$RESULTS_DIR"/job_*
-}
-
-# SSE-aware full-file comparison (local file vs S3 object).
-_hsc_cmp() {
-    local local_file="$1" s3uri="$2"
-    # shellcheck disable=SC2086
-    $BINARY cmp $SSE_DOWNLOAD_ARGS "$local_file" "$s3uri" 2>/dev/null
-}
-
 # Function to create test file
 create_test_file() {
     local size=$1
@@ -235,18 +204,14 @@ fi
 step_time
 echo ""
 info "Step 2: Creating test files and uploading objects..."
-# Create all test files in parallel (setup)
 for size in "${SIZES[@]}"; do
-    (
-        filename="$TEST_DIR/testfile_${size}.dat"
-        case $size in
-            *b) truncate -s ${size%b}                     "$filename" ;;
-            *k) truncate -s $((${size%k} * 1024))         "$filename" ;;
-            *m) truncate -s $((${size%m} * 1048576))      "$filename" ;;
-        esac
-    ) &
+    filename="$TEST_DIR/testfile_${size}.dat"
+    case $size in
+        *b) truncate -s ${size%b}                     "$filename" ;;
+        *k) truncate -s $((${size%k} * 1024))         "$filename" ;;
+        *m) truncate -s $((${size%m} * 1048576))      "$filename" ;;
+    esac
 done
-wait
 info "All test files created"
 
 # Upload all objects at once
@@ -271,53 +236,48 @@ info "Step 2b: Testing Multipart Upload (via $BINARY cp)..."
 MULTIPART_SIZES=("1m" "16m" "32m")
 mkdir -p "$TEST_DIR/multipart"
 
-_JOB=0
 for part_size in "${MULTIPART_SIZES[@]}"; do
-    (
-        multipart_file="$TEST_DIR/multipart/multipart_${part_size}_parts.dat"
-        object_key="multipart_${part_size}_parts.dat"
-        part1="$TEST_DIR/multipart/part1_${part_size}.dat"
-        part2="$TEST_DIR/multipart/part2_${part_size}.dat"
-        part3="$TEST_DIR/multipart/part3_${part_size}.dat"
+    multipart_file="$TEST_DIR/multipart/multipart_${part_size}_parts.dat"
+    object_key="multipart_${part_size}_parts.dat"
+    part1="$TEST_DIR/multipart/part1_${part_size}.dat"
+    part2="$TEST_DIR/multipart/part2_${part_size}.dat"
+    part3="$TEST_DIR/multipart/part3_${part_size}.dat"
 
-        echo "INFO:Creating multipart test file with ${part_size} parts..."
-        case $part_size in
-            1m)  count=1 ;;
-            16m) count=16 ;;
-            32m) count=32 ;;
-        esac
-        truncate -s $((count * 1048576)) "$part1" &
-        truncate -s $((count * 1048576)) "$part2" &
-        truncate -s $((count * 1048576)) "$part3" &
-        wait
+    info "Creating multipart test file with ${part_size} parts..."
+    case $part_size in
+        1m)  count=1 ;;
+        16m) count=16 ;;
+        32m) count=32 ;;
+    esac
+    truncate -s $((count * 1048576)) "$part1"
+    truncate -s $((count * 1048576)) "$part2"
+    truncate -s $((count * 1048576)) "$part3"
 
-        # Combine parts into one file
-        cat "$part1" "$part2" "$part3" > "$multipart_file"
+    # Combine parts into one file
+    cat "$part1" "$part2" "$part3" > "$multipart_file"
 
-        echo "INFO:Uploading $object_key via $BINARY cp (multipart for large files)..."
-        if $BINARY cp $SSE_UPLOAD_ARGS "$multipart_file" "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
-            echo "PASS:Uploaded $object_key"
+    info "Uploading $object_key via $BINARY cp (multipart for large files)..."
+    # shellcheck disable=SC2086
+    if $BINARY cp $SSE_UPLOAD_ARGS "$multipart_file" "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
+        success "Uploaded $object_key"
 
-            # Verify full-object integrity using hsc cmp
-            echo "INFO:Verifying multipart upload integrity for $object_key..."
-            if _hsc_cmp "$multipart_file" "s3://$BUCKET_NAME/$object_key"; then
-                echo "PASS:Multipart upload integrity verified for $object_key"
-            else
-                echo "FAIL:Multipart upload integrity check failed for $object_key"
-                echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key"
-            fi
+        # Verify full-object integrity using hsc cmp
+        info "Verifying multipart upload integrity for $object_key..."
+        # shellcheck disable=SC2086
+        if $BINARY cmp $SSE_DOWNLOAD_ARGS "$multipart_file" "s3://$BUCKET_NAME/$object_key" >/dev/null 2>&1; then
+            success "Multipart upload integrity verified for $object_key"
         else
-            echo "FAIL:Failed to upload $object_key"
-            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key"
+            error "Multipart upload integrity check failed for $object_key" "\$BINARY cp $SSE_UPLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key"
         fi
-
-        # Clean up part files
+    else
+        error "Failed to upload $object_key" "\$BINARY cp $SSE_UPLOAD_ARGS $multipart_file s3://\$BUCKET_NAME/$object_key"
         rm -f "$part1" "$part2" "$part3"
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+        continue
+    fi
+
+    # Clean up part files
+    rm -f "$part1" "$part2" "$part3"
 done
-wait
-collect_results
 
 echo ""
 info "Listing all objects (including multipart uploads)..."
@@ -328,86 +288,74 @@ step_time
 echo ""
 info "Step 3: Downloading objects (full size) and verifying data integrity..."
 mkdir -p "$TEST_DIR/downloads"
-_JOB=0
 for size in "${SIZES[@]}"; do
-    (
-        object_key="testfile_${size}.dat"
-        download_file="$TEST_DIR/downloads/testfile_${size}.dat"
-        original_file="$TEST_DIR/testfile_${size}.dat"
-        echo "INFO:Downloading $object_key..."
-        if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$object_key" "$download_file" >/dev/null 2>&1; then
-            echo "FAIL:Failed to download $object_key"
-            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl"
-            exit 0
-        fi
+    object_key="testfile_${size}.dat"
+    download_file="$TEST_DIR/downloads/testfile_${size}.dat"
+    original_file="$TEST_DIR/testfile_${size}.dat"
+    info "Downloading $object_key..."
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$object_key" "$download_file" >/dev/null 2>&1; then
+        error "Failed to download $object_key" "\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key \$TEST_DIR/downloads/${object_key}"
+        continue
+    fi
 
-        original_size=$(stat -c%s "$original_file")
-        download_size=$(stat -c%s "$download_file")
+    original_size=$(stat -c%s "$original_file")
+    download_size=$(stat -c%s "$download_file")
 
-        if [ "$original_size" -ne "$download_size" ]; then
-            echo "FAIL:Size mismatch for $object_key (expected: $original_size, got: $download_size)"
-            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key /tmp/${object_key}_dl && stat -c%s /tmp/${object_key}_dl"
-            exit 0
-        fi
+    if [ "$original_size" -ne "$download_size" ]; then
+        error "Size mismatch for $object_key (expected: $original_size, got: $download_size)" "\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/$object_key \$TEST_DIR/downloads/${object_key} && stat -c%s \$TEST_DIR/downloads/${object_key}"
+        continue
+    fi
 
-        if $BINARY cmp "$original_file" "$download_file" 2>/dev/null; then
-            echo "PASS:Downloaded and verified $object_key (size: $download_size bytes, content: identical)"
+    if $BINARY cmp "$original_file" "$download_file" >/dev/null 2>&1; then
+        success "Downloaded and verified $object_key (size: $download_size bytes, content: identical)"
+    else
+        error "Data integrity check failed for $object_key" "\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/$object_key s3://\$BUCKET_NAME/$object_key"
+        continue
+    fi
+
+    # Single stat call retrieves ETag, Content-Length, and SHA-256 checksum together.
+    _stat_json=$($BINARY stat --json "s3://$BUCKET_NAME/$object_key" 2>/dev/null)
+    response_etag=$(echo "$_stat_json" | grep '"etag"' | sed 's/.*: *"\(.*\)".*/\1/')
+    response_content_length=$(echo "$_stat_json" | grep '"size"' | sed 's/.*: *\([0-9]*\).*/\1/')
+    response_checksum=$(echo "$_stat_json" | grep '"sha256"' | sed 's/.*: *"\(.*\)".*/\1/')
+
+    # Check ETag header — S3 Express One Zone uses random/opaque ETags by design;
+    # any non-empty ETag is valid (multipart ETags contain "-").
+    if [ -n "$response_etag" ]; then
+        if [[ "$response_etag" == *"-"* ]]; then
+            success "Response ETag (multipart): $response_etag"
         else
-            echo "FAIL:Data integrity check failed for $object_key"
-            echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/$object_key s3://\$BUCKET_NAME/$object_key"
-            exit 0
+            success "Response ETag present: $response_etag"
         fi
+    else
+        error "Response ETag not found for $object_key" "\$BINARY stat s3://\$BUCKET_NAME/$object_key"
+    fi
 
-        # Single stat call retrieves ETag, Content-Length, and SHA-256 checksum together.
-        stat_output=$($BINARY stat "s3://$BUCKET_NAME/$object_key" 2>/dev/null)
-        response_etag=$(echo "$stat_output" | grep "^ETag" | sed 's/ETag *: //' | tr -d '"')
-        response_content_length=$(echo "$stat_output" | grep "^Size" | sed 's/Size *: //; s/ bytes.*//')
-        response_checksum=$(echo "$stat_output" | grep "^SHA256" | awk '{print $3}')
-
-        # Check ETag header — S3 Express One Zone uses random/opaque ETags by design;
-        # any non-empty ETag is valid (multipart ETags contain "-").
-        if [ -n "$response_etag" ]; then
-            if [[ "$response_etag" == *"-"* ]]; then
-                echo "PASS:Response ETag (multipart): $response_etag"
-            else
-                echo "PASS:Response ETag present: $response_etag"
-            fi
+    # Verify SHA-256 checksum if the server returned one (requires upload with --checksum SHA256).
+    # Absence is not a failure — most uploads omit it and integrity is already covered by hsc cmp above.
+    if [ -n "$response_checksum" ]; then
+        expected_checksum=$(openssl dgst -sha256 -binary "$original_file" | base64)
+        if [ "$response_checksum" = "$expected_checksum" ]; then
+            success "SHA-256 checksum verified: $response_checksum"
         else
-            echo "FAIL:Response ETag not found for $object_key"
-            echo "RERUN:\$BINARY stat s3://\$BUCKET_NAME/$object_key"
+            error "SHA-256 checksum mismatch (expected: $expected_checksum, got: $response_checksum)" "\$BINARY stat s3://\$BUCKET_NAME/$object_key"
         fi
+    else
+        info "SHA-256 checksum not returned by server for $object_key (skipped)"
+    fi
 
-        # Verify SHA-256 checksum if the server returned one (requires upload with --checksum SHA256).
-        # Absence is not a failure — most uploads omit it and integrity is already covered by hsc cmp above.
-        if [ -n "$response_checksum" ]; then
-            expected_checksum=$(openssl dgst -sha256 -binary "$original_file" | base64)
-            if [ "$response_checksum" = "$expected_checksum" ]; then
-                echo "PASS:SHA-256 checksum verified: $response_checksum"
-            else
-                echo "FAIL:SHA-256 checksum mismatch (expected: $expected_checksum, got: $response_checksum)"
-                echo "RERUN:\$BINARY stat s3://\$BUCKET_NAME/$object_key"
-            fi
+    # Check Content-Length header
+    if [ -n "$response_content_length" ]; then
+        if [ "$response_content_length" -eq "$original_size" ]; then
+            success "Response Content-Length correct: $response_content_length"
         else
-            echo "INFO:SHA-256 checksum not returned by server for $object_key (skipped)"
+            error "Response Content-Length mismatch (expected: $original_size, got: $response_content_length)" "\$BINARY stat s3://\$BUCKET_NAME/$object_key"
         fi
-
-        # Check Content-Length header
-        if [ -n "$response_content_length" ]; then
-            if [ "$response_content_length" -eq "$original_size" ]; then
-                echo "PASS:Response Content-Length correct: $response_content_length"
-            else
-                echo "FAIL:Response Content-Length mismatch (expected: $original_size, got: $response_content_length)"
-                echo "RERUN:\$BINARY stat s3://\$BUCKET_NAME/$object_key"
-            fi
-        else
-            echo "FAIL:Response Content-Length not found for $object_key"
-            echo "RERUN:\$BINARY stat s3://\$BUCKET_NAME/$object_key"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    else
+        error "Response Content-Length not found for $object_key" "\$BINARY stat s3://\$BUCKET_NAME/$object_key"
+    fi
 done
-wait
-collect_results
 
 # Step 4: Test range requests with integrity verification using hsc cmp
 step_time
@@ -415,134 +363,88 @@ echo ""
 info "Step 4: Testing range requests and verifying data integrity with 'hsc cmp'..."
 
 # check_range <ok_msg> <fail_msg> <original_file> <range_spec> <s3_uri>
-# Emits PASS:/FAIL:/RERUN: to stdout so callers can run it in a background
-# subshell and collect results via collect_results().
 check_range() {
     local ok_msg=$1 fail_msg=$2 orig=$3 range=$4 s3uri=$5
     # shellcheck disable=SC2086
-    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
-        echo "PASS:$ok_msg"
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" >/dev/null 2>&1; then
+        success "$ok_msg"
     else
-        echo "FAIL:$fail_msg"
-        echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
-    fi
-}
-
-# verify_range kept for backward compatibility (used as a plain boolean by callers)
-verify_range() {
-    local original_file=$1
-    local range_spec=$2
-    local s3_uri=$3
-
-    # shellcheck disable=SC2086
-    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range_spec" "$original_file" "$s3_uri" 2>/dev/null; then
-        return 0
-    else
-        return 1
+        error "$fail_msg" "\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
     fi
 }
 
 # Test different ranges on 1m file
 test_ranges=("bytes=0-1023" "bytes=1024-2047" "bytes=0-511" "bytes=512000-1048575")
-_JOB=0
 for range in "${test_ranges[@]}"; do
     original_file="$TEST_DIR/testfile_1m.dat"
-    (
-        echo "INFO:Verifying testfile_1m.dat range: $range..."
-        check_range "Range verified: $range" "Range integrity failed: $range" \
-            "$original_file" "$range" "s3://$BUCKET_NAME/testfile_1m.dat"
-    ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+    info "Verifying testfile_1m.dat range: $range..."
+    check_range "Range verified: $range" "Range integrity failed: $range" \
+        "$original_file" "$range" "s3://$BUCKET_NAME/testfile_1m.dat"
 done
 
-(
-    echo "INFO:Testing range on large file (64m)..."
-    check_range "Range on 64m file verified: bytes=0-1048575 (1MB)" \
-        "Range on 64m file integrity failed: bytes=0-1048575" \
-        "$TEST_DIR/testfile_64m.dat" "bytes=0-1048575" "s3://$BUCKET_NAME/testfile_64m.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+info "Testing range on large file (64m)..."
+check_range "Range on 64m file verified: bytes=0-1048575 (1MB)" \
+    "Range on 64m file integrity failed: bytes=0-1048575" \
+    "$TEST_DIR/testfile_64m.dat" "bytes=0-1048575" "s3://$BUCKET_NAME/testfile_64m.dat"
 
-(
-    echo "INFO:Testing middle range on 8m file..."
-    check_range "Middle range on 8m file verified: bytes=4194304-5242879" \
-        "Middle range on 8m file integrity failed: bytes=4194304-5242879" \
-        "$TEST_DIR/testfile_8m.dat" "bytes=4194304-5242879" "s3://$BUCKET_NAME/testfile_8m.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+info "Testing middle range on 8m file..."
+check_range "Middle range on 8m file verified: bytes=4194304-5242879" \
+    "Middle range on 8m file integrity failed: bytes=4194304-5242879" \
+    "$TEST_DIR/testfile_8m.dat" "bytes=4194304-5242879" "s3://$BUCKET_NAME/testfile_8m.dat"
 
-(
-    echo "INFO:Testing last 1KB of 32m file..."
-    check_range "Last 1KB of 32m file verified: bytes=33553408-33554431" \
-        "Last 1KB of 32m file integrity failed: bytes=33553408-33554431" \
-        "$TEST_DIR/testfile_32m.dat" "bytes=33553408-33554431" "s3://$BUCKET_NAME/testfile_32m.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+info "Testing last 1KB of 32m file..."
+check_range "Last 1KB of 32m file verified: bytes=33553408-33554431" \
+    "Last 1KB of 32m file integrity failed: bytes=33553408-33554431" \
+    "$TEST_DIR/testfile_32m.dat" "bytes=33553408-33554431" "s3://$BUCKET_NAME/testfile_32m.dat"
 
 echo ""
 info "Testing range requests on multipart uploaded objects..."
 info "Testing ranges on multipart object with 1m parts (3MB total)..."
 
-(
-    check_range "Multipart 1m: First half of part 1 verified" \
-        "Multipart 1m: First half of part 1 integrity failed" \
-        "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=0-524287" \
-        "s3://$BUCKET_NAME/multipart_1m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-(
-    echo "INFO:  CRITICAL: Range across part 1->2 boundary"
-    check_range "Multipart 1m: Range across part boundary (part 1->2) verified" \
-        "Multipart 1m: Range across part boundary integrity failed" \
-        "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1048000-1049599" \
-        "s3://$BUCKET_NAME/multipart_1m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-(
-    check_range "Multipart 1m: Middle of part 2 verified" \
-        "Multipart 1m: Middle of part 2 integrity failed" \
-        "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1572864-2097151" \
-        "s3://$BUCKET_NAME/multipart_1m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+check_range "Multipart 1m: First half of part 1 verified" \
+    "Multipart 1m: First half of part 1 integrity failed" \
+    "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=0-524287" \
+    "s3://$BUCKET_NAME/multipart_1m_parts.dat"
+info "  CRITICAL: Range across part 1->2 boundary"
+check_range "Multipart 1m: Range across part boundary (part 1->2) verified" \
+    "Multipart 1m: Range across part boundary integrity failed" \
+    "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1048000-1049599" \
+    "s3://$BUCKET_NAME/multipart_1m_parts.dat"
+check_range "Multipart 1m: Middle of part 2 verified" \
+    "Multipart 1m: Middle of part 2 integrity failed" \
+    "$TEST_DIR/multipart/multipart_1m_parts.dat" "bytes=1572864-2097151" \
+    "s3://$BUCKET_NAME/multipart_1m_parts.dat"
 
 info "Testing ranges on multipart object with 16m parts (48MB total)..."
-(
-    check_range "Multipart 16m: First 8MB of part 1 verified" \
-        "Multipart 16m: First 8MB integrity failed" \
-        "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=0-8388607" \
-        "s3://$BUCKET_NAME/multipart_16m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-(
-    echo "INFO:  CRITICAL: Range across 16MB part boundary"
-    check_range "Multipart 16m: Range across part boundary (16MB boundary) verified" \
-        "Multipart 16m: Range across part boundary integrity failed" \
-        "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=16776192-16778239" \
-        "s3://$BUCKET_NAME/multipart_16m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-(
-    check_range "Multipart 16m: Range in part 3 verified" \
-        "Multipart 16m: Range in part 3 integrity failed" \
-        "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=40000000-41000000" \
-        "s3://$BUCKET_NAME/multipart_16m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+check_range "Multipart 16m: First 8MB of part 1 verified" \
+    "Multipart 16m: First 8MB integrity failed" \
+    "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=0-8388607" \
+    "s3://$BUCKET_NAME/multipart_16m_parts.dat"
+info "  CRITICAL: Range across 16MB part boundary"
+check_range "Multipart 16m: Range across part boundary (16MB boundary) verified" \
+    "Multipart 16m: Range across part boundary integrity failed" \
+    "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=16776192-16778239" \
+    "s3://$BUCKET_NAME/multipart_16m_parts.dat"
+check_range "Multipart 16m: Range in part 3 verified" \
+    "Multipart 16m: Range in part 3 integrity failed" \
+    "$TEST_DIR/multipart/multipart_16m_parts.dat" "bytes=40000000-41000000" \
+    "s3://$BUCKET_NAME/multipart_16m_parts.dat"
 
 info "Testing ranges on multipart object with 32m parts (96MB total)..."
-(
-    check_range "Multipart 32m: End of part 1 verified" \
-        "Multipart 32m: End of part 1 integrity failed" \
-        "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=33554000-33554431" \
-        "s3://$BUCKET_NAME/multipart_32m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-(
-    echo "INFO:  CRITICAL: Range across part 2->3 boundary (64MB mark)"
-    check_range "Multipart 32m: Range across part 2->3 boundary (64MB) verified" \
-        "Multipart 32m: Range across part 2->3 boundary integrity failed" \
-        "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=67108000-67109000" \
-        "s3://$BUCKET_NAME/multipart_32m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-(
-    echo "INFO:  CRITICAL: Large range spanning all 3 parts (80MB)"
-    check_range "Multipart 32m: Large range spanning all parts verified (80MB)" \
-        "Multipart 32m: Large range spanning all parts integrity failed" \
-        "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=10000000-90000000" \
-        "s3://$BUCKET_NAME/multipart_32m_parts.dat"
-) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-wait
-collect_results
+check_range "Multipart 32m: End of part 1 verified" \
+    "Multipart 32m: End of part 1 integrity failed" \
+    "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=33554000-33554431" \
+    "s3://$BUCKET_NAME/multipart_32m_parts.dat"
+info "  CRITICAL: Range across part 2->3 boundary (64MB mark)"
+check_range "Multipart 32m: Range across part 2->3 boundary (64MB) verified" \
+    "Multipart 32m: Range across part 2->3 boundary integrity failed" \
+    "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=67108000-67109000" \
+    "s3://$BUCKET_NAME/multipart_32m_parts.dat"
+info "  CRITICAL: Large range spanning all 3 parts (80MB)"
+check_range "Multipart 32m: Large range spanning all parts verified (80MB)" \
+    "Multipart 32m: Large range spanning all parts integrity failed" \
+    "$TEST_DIR/multipart/multipart_32m_parts.dat" "bytes=10000000-90000000" \
+    "s3://$BUCKET_NAME/multipart_32m_parts.dat"
 
 # Step 5: Chunk boundary tests — putObject / getObject
 step_time
@@ -580,35 +482,27 @@ fi
 # Step 5b: getObject — download and byte-verify every chunk-boundary file in parallel
 echo ""
 info "Step 5b: getObject — downloading and verifying chunk-boundary files..."
-_JOB=0
 for i in "${!CB_LABELS[@]}"; do
     label=${CB_LABELS[$i]}; size=${CB_BYTES[$i]}
-    (
-        orig="$TEST_DIR/chunk_boundary/cb_${label}.dat"
-        dl="$TEST_DIR/chunk_downloads/cb_${label}.dat"
-        echo "INFO:getObject cb_${label}..."
-        if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/cb_${label}.dat" "$dl" >/dev/null 2>&1; then
-            echo "FAIL:getObject failed for cb_${label}"
-            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat \$TEST_DIR/chunk_downloads/cb_${label}.dat"
-            exit 0
-        fi
-        actual=$(stat -c%s "$dl")
-        if [ "$actual" -ne "$size" ]; then
-            echo "FAIL:getObject size mismatch cb_${label}: expected ${size}, got ${actual}"
-            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat \$TEST_DIR/chunk_downloads/cb_${label}.dat && stat -c%s \$TEST_DIR/chunk_downloads/cb_${label}.dat"
-            exit 0
-        fi
-        if $BINARY cmp "$orig" "$dl" 2>/dev/null; then
-            echo "PASS:getObject cb_${label} (${size} bytes, content identical)"
-        else
-            echo "FAIL:getObject data integrity failed for cb_${label}"
-            echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/chunk_boundary/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    orig="$TEST_DIR/chunk_boundary/cb_${label}.dat"
+    dl="$TEST_DIR/chunk_downloads/cb_${label}.dat"
+    info "getObject cb_${label}..."
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/cb_${label}.dat" "$dl" >/dev/null 2>&1; then
+        error "getObject failed for cb_${label}" "\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat \$TEST_DIR/chunk_downloads/cb_${label}.dat"
+        continue
+    fi
+    actual=$(stat -c%s "$dl")
+    if [ "$actual" -ne "$size" ]; then
+        error "getObject size mismatch cb_${label}: expected ${size}, got ${actual}" "\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/cb_${label}.dat \$TEST_DIR/chunk_downloads/cb_${label}.dat && stat -c%s \$TEST_DIR/chunk_downloads/cb_${label}.dat"
+        continue
+    fi
+    if $BINARY cmp "$orig" "$dl" >/dev/null 2>&1; then
+        success "getObject cb_${label} (${size} bytes, content identical)"
+    else
+        error "getObject data integrity failed for cb_${label}" "\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/chunk_boundary/cb_${label}.dat s3://\$BUCKET_NAME/cb_${label}.dat"
+    fi
 done
-wait
-collect_results
 
 # Step 5c: getObjectRange — ±4-byte ranges targeting every chunk boundary
 step_time
@@ -620,57 +514,53 @@ _cmp_range() {
     local orig="$TEST_DIR/chunk_boundary/cb_${label}.dat"
     local s3uri="s3://$BUCKET_NAME/cb_${label}.dat"
     # shellcheck disable=SC2086
-    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
-        echo "PASS:getObjectRange [cb_${label}] $range"
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" >/dev/null 2>&1; then
+        success "getObjectRange [cb_${label}] $range"
     else
-        echo "FAIL:getObjectRange [cb_${label}] $range — FAILED"
-        echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
+        error "getObjectRange [cb_${label}] $range — FAILED" "\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
     fi
 }
 
 # chunk1_exact (size=C): object fills exactly one chunk; test boundary edge bytes
 info "  [chunk1_exact size=${C}]"
-_JOB=0
-( _cmp_range chunk1_exact "bytes=0-0" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _cmp_range chunk1_exact "bytes=$((C-1))-$((C-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _cmp_range chunk1_exact "bytes=$((C/2))-$((C-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
+_cmp_range chunk1_exact "bytes=0-0"
+_cmp_range chunk1_exact "bytes=$((C-1))-$((C-1))"
+_cmp_range chunk1_exact "bytes=$((C/2))-$((C-1))"
 
 # chunk1_plus1 (size=C+1): 1 byte spills into 2nd chunk — straddle chunk1 boundary
 info "  [chunk1_plus1 size=$((C+1))] — chunk1 boundary straddle"
-( _cmp_range chunk1_plus1 "bytes=$((C-4))-$((C-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # last 4 bytes of chunk1
-( _cmp_range chunk1_plus1 "bytes=$((C))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))         # only byte in chunk2
-( _cmp_range chunk1_plus1 "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 1 byte each side of boundary
-( _cmp_range chunk1_plus1 "bytes=$((C-4))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 5 bytes crossing boundary
+_cmp_range chunk1_plus1 "bytes=$((C-4))-$((C-1))"    # last 4 bytes of chunk1
+_cmp_range chunk1_plus1 "bytes=$((C))-$((C))"         # only byte in chunk2
+_cmp_range chunk1_plus1 "bytes=$((C-1))-$((C))"       # 1 byte each side of boundary
+_cmp_range chunk1_plus1 "bytes=$((C-4))-$((C))"       # 5 bytes crossing boundary
 
 # chunk2_minus1 (size=2C-1): ends 1 byte before the 2nd chunk boundary
 info "  [chunk2_minus1 size=$((C2-1))]"
-( _cmp_range chunk2_minus1 "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # cross chunk1→2 boundary
-( _cmp_range chunk2_minus1 "bytes=$((C2-5))-$((C2-2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))  # last 4 bytes of object
+_cmp_range chunk2_minus1 "bytes=$((C-4))-$((C+3))"    # cross chunk1→2 boundary
+_cmp_range chunk2_minus1 "bytes=$((C2-5))-$((C2-2))"  # last 4 bytes of object
 
 # chunk2_exact (size=2C): two full chunks
 info "  [chunk2_exact size=${C2}]"
-( _cmp_range chunk2_exact "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # cross chunk1→2 boundary
-( _cmp_range chunk2_exact "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # single-byte straddle
-( _cmp_range chunk2_exact "bytes=$((C2-4))-$((C2-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))   # last 4 bytes
-( _cmp_range chunk2_exact "bytes=0-$((C2-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # full object
+_cmp_range chunk2_exact "bytes=$((C-4))-$((C+3))"     # cross chunk1→2 boundary
+_cmp_range chunk2_exact "bytes=$((C-1))-$((C))"        # single-byte straddle
+_cmp_range chunk2_exact "bytes=$((C2-4))-$((C2-1))"   # last 4 bytes
+_cmp_range chunk2_exact "bytes=0-$((C2-1))"            # full object
 
 # chunk2_plus1 (size=2C+1): 1 byte spills into 3rd chunk — straddle chunk2 boundary
 info "  [chunk2_plus1 size=$((C2+1))] — chunk2 boundary straddle"
-( _cmp_range chunk2_plus1 "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # cross chunk1→2
-( _cmp_range chunk2_plus1 "bytes=$((C2-1))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # 1 byte each side of chunk2
-( _cmp_range chunk2_plus1 "bytes=$((C2-4))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # 5 bytes crossing chunk2→3
-( _cmp_range chunk2_plus1 "bytes=$((C2))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # only byte in chunk3
+_cmp_range chunk2_plus1 "bytes=$((C-4))-$((C+3))"     # cross chunk1→2
+_cmp_range chunk2_plus1 "bytes=$((C2-1))-$((C2))"     # 1 byte each side of chunk2
+_cmp_range chunk2_plus1 "bytes=$((C2-4))-$((C2))"     # 5 bytes crossing chunk2→3
+_cmp_range chunk2_plus1 "bytes=$((C2))-$((C2))"        # only byte in chunk3
 
 # chunk3_exact (size=3C): three full chunks — every boundary exercised
 info "  [chunk3_exact size=${C3}] — all boundaries"
-( _cmp_range chunk3_exact "bytes=$((C-4))-$((C+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))      # chunk1→2
-( _cmp_range chunk3_exact "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))         # chunk1→2 single-byte straddle
-( _cmp_range chunk3_exact "bytes=$((C2-4))-$((C2+3))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # chunk2→3
-( _cmp_range chunk3_exact "bytes=$((C2-1))-$((C2))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # chunk2→3 single-byte straddle
-( _cmp_range chunk3_exact "bytes=$((C3-4))-$((C3-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))    # last 4 bytes of object
-( _cmp_range chunk3_exact "bytes=$((C/2))-$((C2+C/2-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++)) # large range spanning all boundaries
-wait
-collect_results
+_cmp_range chunk3_exact "bytes=$((C-4))-$((C+3))"      # chunk1→2
+_cmp_range chunk3_exact "bytes=$((C-1))-$((C))"         # chunk1→2 single-byte straddle
+_cmp_range chunk3_exact "bytes=$((C2-4))-$((C2+3))"    # chunk2→3
+_cmp_range chunk3_exact "bytes=$((C2-1))-$((C2))"       # chunk2→3 single-byte straddle
+_cmp_range chunk3_exact "bytes=$((C3-4))-$((C3-1))"    # last 4 bytes of object
+_cmp_range chunk3_exact "bytes=$((C/2))-$((C2+C/2-1))" # large range spanning all boundaries
 
 # Step 6: uploadPart — multipart with part sizes that cross storage chunk boundaries
 step_time
@@ -681,40 +571,33 @@ info "  Part sizes 5M / 6M / 7M: none is a multiple of the ${CHUNK_SIZE}-byte st
 mkdir -p "$TEST_DIR/multipart_chunk"
 MPC_SIZES=("5m" "6m" "7m")   # 3 parts each; intentionally misaligned with 4M chunks
 
-# Phase 1: create files and upload all objects in parallel
-_JOB=0
+# Phase 1: create files and upload all objects sequentially
 for part_size in "${MPC_SIZES[@]}"; do
-    (
-        part_bytes=$((${part_size%m} * 1048576))
-        total=$((part_bytes * 3))
-        combined="$TEST_DIR/multipart_chunk/mpc_${part_size}x3.dat"
-        key="mpc_${part_size}x3.dat"
+    part_bytes=$((${part_size%m} * 1048576))
+    total=$((part_bytes * 3))
+    combined="$TEST_DIR/multipart_chunk/mpc_${part_size}x3.dat"
+    key="mpc_${part_size}x3.dat"
 
-        echo "INFO:Creating ${part_size}×3 file (${total} bytes)..."
-        truncate -s "$total" "$combined"
+    info "Creating ${part_size}×3 file (${total} bytes)..."
+    truncate -s "$total" "$combined"
 
-        echo "INFO:uploadPart $key (${total} bytes)..."
-        if ! $BINARY cp $SSE_UPLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
-            echo "FAIL:uploadPart failed for $key"
-            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
-            exit 0
-        fi
-        echo "PASS:uploadPart $key (${total} bytes)"
+    info "uploadPart $key (${total} bytes)..."
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_UPLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
+        error "uploadPart failed for $key" "\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
+        continue
+    fi
+    success "uploadPart $key (${total} bytes)"
 
-        if ! _hsc_cmp "$combined" "s3://$BUCKET_NAME/$key"; then
-            echo "FAIL:uploadPart full-object integrity failed for $key"
-            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
-            exit 0
-        fi
-        echo "PASS:uploadPart full-object integrity verified for $key"
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    # shellcheck disable=SC2086
+    if ! $BINARY cmp $SSE_DOWNLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
+        error "uploadPart full-object integrity failed for $key" "\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
+        continue
+    fi
+    success "uploadPart full-object integrity verified for $key"
 done
-wait
-collect_results
 
-# Phase 2: getObjectRange at every chunk boundary — all objects × all boundaries in parallel
-_JOB=0
+# Phase 2: getObjectRange at every chunk boundary — sequential
 for part_size in "${MPC_SIZES[@]}"; do
     part_bytes=$((${part_size%m} * 1048576))
     total=$((part_bytes * 3))
@@ -724,21 +607,15 @@ for part_size in "${MPC_SIZES[@]}"; do
     for (( ci=1; ci < num_chunks; ci++ )); do
         boundary=$((ci * C))
         range="bytes=$((boundary - 4))-$((boundary + 3))"
-        (
-            if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
-                echo "INFO:Range check skipped (SSE-C): $key chunk${ci}→$((ci+1)) boundary $range"
-            elif $BINARY cmp --range "$range" "$combined" "s3://$BUCKET_NAME/$key" 2>/dev/null; then
-                echo "PASS:getObjectRange $key chunk${ci}→$((ci+1)) boundary $range"
-            else
-                echo "FAIL:getObjectRange $key chunk${ci}→$((ci+1)) boundary FAILED $range"
-                echo "RERUN:\$BINARY cmp --range \"$range\" $combined s3://\$BUCKET_NAME/$key"
-            fi
-        ) > "$RESULTS_DIR/job_${_JOB}" &
-        ((_JOB++))
+        if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
+            info "Range check skipped (SSE-C): $key chunk${ci}→$((ci+1)) boundary $range"
+        elif $BINARY cmp --range "$range" "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
+            success "getObjectRange $key chunk${ci}→$((ci+1)) boundary $range"
+        else
+            error "getObjectRange $key chunk${ci}→$((ci+1)) boundary FAILED $range" "\$BINARY cmp --range \"$range\" $combined s3://\$BUCKET_NAME/$key"
+        fi
     done
 done
-wait
-collect_results
 
 # Step 7: copyObject — server-side copy at sub-chunk, exact-chunk, and multi-chunk sizes
 step_time
@@ -756,31 +633,25 @@ COPY_ORIGS=("$TEST_DIR/chunk_boundary/cb_chunk1_minus1.dat"
             "$TEST_DIR/chunk_boundary/cb_chunk3_exact.dat"
             "$TEST_DIR/multipart_chunk/mpc_5mx3.dat")
 
-_JOB=0
 for i in "${!COPY_SRCS[@]}"; do
-    (
-        src=${COPY_SRCS[$i]}; dst=${COPY_DSTS[$i]}; orig=${COPY_ORIGS[$i]}
-        echo "INFO:copyObject $src → $dst..."
-        if ! $BINARY cp $SSE_COPY_ARGS "s3://$BUCKET_NAME/$src" "s3://$BUCKET_NAME/$dst" >/dev/null 2>&1; then
-            echo "FAIL:copyObject failed: $src → $dst"
-            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
-            exit 0
-        fi
-        echo "PASS:copyObject $src → $dst"
-        # Download the copy and byte-verify against the local original
-        dl="$TEST_DIR/copy_verify/$dst"
-        if $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$dst" "$dl" >/dev/null 2>&1 \
-                && $BINARY cmp "$orig" "$dl" 2>/dev/null; then
-            echo "PASS:copyObject integrity verified: $dst matches $src"
-        else
-            echo "FAIL:copyObject integrity failed: $dst does not match $src"
-            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cmp $SSE_DOWNLOAD_ARGS $orig s3://\$BUCKET_NAME/$dst"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    src=${COPY_SRCS[$i]}; dst=${COPY_DSTS[$i]}; orig=${COPY_ORIGS[$i]}
+    info "copyObject $src → $dst..."
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_COPY_ARGS "s3://$BUCKET_NAME/$src" "s3://$BUCKET_NAME/$dst" >/dev/null 2>&1; then
+        error "copyObject failed: $src → $dst" "\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
+        continue
+    fi
+    success "copyObject $src → $dst"
+    # Download the copy and byte-verify against the local original
+    dl="$TEST_DIR/copy_verify/$dst"
+    # shellcheck disable=SC2086
+    if $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$dst" "$dl" >/dev/null 2>&1 \
+            && $BINARY cmp "$orig" "$dl" >/dev/null 2>&1; then
+        success "copyObject integrity verified: $dst matches $src"
+    else
+        error "copyObject integrity failed: $dst does not match $src" "\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cmp $SSE_DOWNLOAD_ARGS $orig s3://\$BUCKET_NAME/$dst"
+    fi
 done
-wait
-collect_results
 
 # Step 8: EC stripe boundary tests
 #
@@ -836,11 +707,9 @@ EC_BYTES=(
     $((2*C+S42))      $((2*C+S21))
 )
 
-# Create all EC test files in parallel (sparse zero-filled)
 for i in "${!EC_LABELS[@]}"; do
-    truncate -s "${EC_BYTES[$i]}" "$TEST_DIR/ec/ec_${EC_LABELS[$i]}.dat" &
+    truncate -s "${EC_BYTES[$i]}" "$TEST_DIR/ec/ec_${EC_LABELS[$i]}.dat"
 done
-wait
 info "EC stripe test files created (${#EC_LABELS[@]} files)"
 
 # Upload all via sync
@@ -851,38 +720,30 @@ else
     error "putObject: sync failed for EC stripe files"
 fi
 
-# Download + byte-verify all in parallel
+# Download + byte-verify all sequentially
 echo ""
 info "Step 8a getObject: downloading and verifying EC stripe objects..."
-_JOB=0
 for i in "${!EC_LABELS[@]}"; do
     label=${EC_LABELS[$i]}; size=${EC_BYTES[$i]}
-    (
-        orig="$TEST_DIR/ec/ec_${label}.dat"
-        dl="$TEST_DIR/ec_dl/ec_${label}.dat"
-        echo "INFO:getObject ec_${label}..."
-        if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/ec_${label}.dat" "$dl" >/dev/null 2>&1; then
-            echo "FAIL:getObject failed ec_${label}"
-            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat \$TEST_DIR/ec_dl/ec_${label}.dat"
-            exit 0
-        fi
-        actual=$(stat -c%s "$dl")
-        if [ "$actual" -ne "$size" ]; then
-            echo "FAIL:getObject size mismatch ec_${label}: expected ${size} got ${actual}"
-            echo "RERUN:\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat \$TEST_DIR/ec_dl/ec_${label}.dat && stat -c%s \$TEST_DIR/ec_dl/ec_${label}.dat"
-            exit 0
-        fi
-        if $BINARY cmp "$orig" "$dl" 2>/dev/null; then
-            echo "PASS:getObject ec_${label} (${size}B content identical)"
-        else
-            echo "FAIL:getObject data integrity failed ec_${label}"
-            echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/ec/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    orig="$TEST_DIR/ec/ec_${label}.dat"
+    dl="$TEST_DIR/ec_dl/ec_${label}.dat"
+    info "getObject ec_${label}..."
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/ec_${label}.dat" "$dl" >/dev/null 2>&1; then
+        error "getObject failed ec_${label}" "\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat \$TEST_DIR/ec_dl/ec_${label}.dat"
+        continue
+    fi
+    actual=$(stat -c%s "$dl")
+    if [ "$actual" -ne "$size" ]; then
+        error "getObject size mismatch ec_${label}: expected ${size} got ${actual}" "\$BINARY cp $SSE_DOWNLOAD_ARGS s3://\$BUCKET_NAME/ec_${label}.dat \$TEST_DIR/ec_dl/ec_${label}.dat && stat -c%s \$TEST_DIR/ec_dl/ec_${label}.dat"
+        continue
+    fi
+    if $BINARY cmp "$orig" "$dl" >/dev/null 2>&1; then
+        success "getObject ec_${label} (${size}B content identical)"
+    else
+        error "getObject data integrity failed ec_${label}" "\$BINARY cmp $SSE_DOWNLOAD_ARGS \$TEST_DIR/ec/ec_${label}.dat s3://\$BUCKET_NAME/ec_${label}.dat"
+    fi
 done
-wait
-collect_results
 
 # ── 8b: getObjectRange at every EC stripe boundary ────────────────────────────
 step_time
@@ -895,69 +756,65 @@ _ec_range() {
     local orig="$TEST_DIR/ec/ec_${label}.dat"
     local s3uri="s3://$BUCKET_NAME/ec_${label}.dat"
     # shellcheck disable=SC2086
-    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" 2>/dev/null; then
-        echo "PASS:getObjectRange [ec_${label}] $range"
+    if $BINARY cmp $SSE_DOWNLOAD_ARGS --range "$range" "$orig" "$s3uri" >/dev/null 2>&1; then
+        success "getObjectRange [ec_${label}] $range"
     else
-        echo "FAIL:getObjectRange [ec_${label}] $range — FAILED"
-        echo "RERUN:\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
+        error "getObjectRange [ec_${label}] $range — FAILED" "\$BINARY cmp $SSE_DOWNLOAD_ARGS --range \"$range\" $orig $s3uri"
     fi
 }
 
 # EC4+2 stripe-1 boundary (offset = S42) — object size must be > S42
 info "  EC4+2 stripe-1 @ offset ${S42} (policy boundary: C/4)"
-_JOB=0
-( _ec_range "s42_p1"     "bytes=$((S42-1))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))           # 2B straddle
-( _ec_range "s42_p1"     "bytes=$((S42-4))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))           # 4B before + boundary
+_ec_range "s42_p1"     "bytes=$((S42-1))-$((S42))"           # 2B straddle
+_ec_range "s42_p1"     "bytes=$((S42-4))-$((S42))"           # 4B before + boundary
 
 # EC4+2 stripe-3 boundary (offset = 3*S42) — last stripe edge before chunk end
 info "  EC4+2 stripe-3 @ offset $((3*S42)) (policy boundary: 3C/4)"
-( _ec_range "s42x3_p1"   "bytes=$((3*S42-1))-$((3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 2B straddle
-( _ec_range "s42x3_p1"   "bytes=$((3*S42-4))-$((3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 4B before
+_ec_range "s42x3_p1"   "bytes=$((3*S42-1))-$((3*S42))"       # 2B straddle
+_ec_range "s42x3_p1"   "bytes=$((3*S42-4))-$((3*S42))"       # 4B before
 
 # EC2+1 stripe boundary (offset = S21 = 2*S42)
 info "  EC2+1 stripe   @ offset ${S21} (policy boundary: C/2)"
-( _ec_range "s21_p1"     "bytes=$((S21-1))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # 2B straddle
-( _ec_range "s21_p1"     "bytes=$((S21-4))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "s21_p1"     "bytes=0-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                     # first stripe + 1B
+_ec_range "s21_p1"     "bytes=$((S21-1))-$((S21))"            # 2B straddle
+_ec_range "s21_p1"     "bytes=$((S21-4))-$((S21))"
+_ec_range "s21_p1"     "bytes=0-$((S21))"                     # first stripe + 1B
 
 # Inside chunk-2: EC4+2 stripe-1 (offset = C+S42)
 info "  EC4+2 stripe-1 in chunk-2 @ offset $((C+S42))"
-( _ec_range "c_s42_p1"   "bytes=$((C+S42-1))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 2B straddle
-( _ec_range "c_s42_p1"   "bytes=$((C+S42-4))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "c_s42_p1"   "bytes=$((C-1))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # chunk boundary → stripe
+_ec_range "c_s42_p1"   "bytes=$((C+S42-1))-$((C+S42))"       # 2B straddle
+_ec_range "c_s42_p1"   "bytes=$((C+S42-4))-$((C+S42))"
+_ec_range "c_s42_p1"   "bytes=$((C-1))-$((C+S42))"            # chunk boundary → stripe
 
 # Inside chunk-2: EC2+1 stripe (offset = C+S21)
 info "  EC2+1 stripe   in chunk-2 @ offset $((C+S21))"
-( _ec_range "c_s21_p1"   "bytes=$((C+S21-1))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # 2B straddle
-( _ec_range "c_s21_p1"   "bytes=$((C+S21-4))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "c_s21_p1"   "bytes=$((C-4))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # wide: chunk boundary → EC2+1 stripe
+_ec_range "c_s21_p1"   "bytes=$((C+S21-1))-$((C+S21))"       # 2B straddle
+_ec_range "c_s21_p1"   "bytes=$((C+S21-4))-$((C+S21))"
+_ec_range "c_s21_p1"   "bytes=$((C-4))-$((C+S21))"            # wide: chunk boundary → EC2+1 stripe
 
 # Inside chunk-2: EC4+2 stripe-3 (offset = C+3*S42)
 info "  EC4+2 stripe-3 in chunk-2 @ offset $((C+3*S42))"
-( _ec_range "c_s42x3_p1" "bytes=$((C+3*S42-1))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))   # 2B straddle
-( _ec_range "c_s42x3_p1" "bytes=$((C+3*S42-4))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "c_s42x3_p1" "bytes=$((C+S21-4))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))     # EC2+1→EC4+2 within chunk-2
+_ec_range "c_s42x3_p1" "bytes=$((C+3*S42-1))-$((C+3*S42))"   # 2B straddle
+_ec_range "c_s42x3_p1" "bytes=$((C+3*S42-4))-$((C+3*S42))"
+_ec_range "c_s42x3_p1" "bytes=$((C+S21-4))-$((C+3*S42))"     # EC2+1→EC4+2 within chunk-2
 
 # Large 2-chunk objects: traverse every stripe and chunk boundary in one object
 info "  Large object c2_s42 (${#}B): all boundaries"
-( _ec_range "c2_s42"     "bytes=$((S42-1))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # EC4+2 in chunk-1
-( _ec_range "c2_s42"     "bytes=$((3*S42-1))-$((3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # EC4+2 stripe-3 in chunk-1
-( _ec_range "c2_s42"     "bytes=$((S21-1))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))            # EC2+1 in chunk-1
-( _ec_range "c2_s42"     "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                # chunk-1 → chunk-2
-( _ec_range "c2_s42"     "bytes=$((C+S42-1))-$((C+S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # EC4+2 in chunk-2
-( _ec_range "c2_s42"     "bytes=$((C+S21-1))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))        # EC2+1 in chunk-2
-( _ec_range "c2_s42"     "bytes=$((C+3*S42-1))-$((C+3*S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))   # EC4+2 stripe-3 in chunk-2
-( _ec_range "c2_s42"     "bytes=$((2*C-1))-$((2*C+S42-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))      # chunk-2 → chunk-3 + full stripe
+_ec_range "c2_s42"     "bytes=$((S42-1))-$((S42))"            # EC4+2 in chunk-1
+_ec_range "c2_s42"     "bytes=$((3*S42-1))-$((3*S42))"        # EC4+2 stripe-3 in chunk-1
+_ec_range "c2_s42"     "bytes=$((S21-1))-$((S21))"            # EC2+1 in chunk-1
+_ec_range "c2_s42"     "bytes=$((C-1))-$((C))"                # chunk-1 → chunk-2
+_ec_range "c2_s42"     "bytes=$((C+S42-1))-$((C+S42))"        # EC4+2 in chunk-2
+_ec_range "c2_s42"     "bytes=$((C+S21-1))-$((C+S21))"        # EC2+1 in chunk-2
+_ec_range "c2_s42"     "bytes=$((C+3*S42-1))-$((C+3*S42))"   # EC4+2 stripe-3 in chunk-2
+_ec_range "c2_s42"     "bytes=$((2*C-1))-$((2*C+S42-1))"      # chunk-2 → chunk-3 + full stripe
 
 info "  Large object c2_s21 (${#}B): all boundaries"
-( _ec_range "c2_s21"     "bytes=$((S42-1))-$((S42))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "c2_s21"     "bytes=$((S21-1))-$((S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "c2_s21"     "bytes=$((C-1))-$((C))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                 # chunk boundary
-( _ec_range "c2_s21"     "bytes=$((C+S21-1))-$((C+S21))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))
-( _ec_range "c2_s21"     "bytes=$((2*C-1))-$((2*C+S21-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))       # chunk-2→3 + entire EC2+1 stripe
-( _ec_range "c2_s21"     "bytes=0-$((2*C+S21-1))" ) > "$RESULTS_DIR/job_${_JOB}" & ((_JOB++))                # full object
-wait
-collect_results
+_ec_range "c2_s21"     "bytes=$((S42-1))-$((S42))"
+_ec_range "c2_s21"     "bytes=$((S21-1))-$((S21))"
+_ec_range "c2_s21"     "bytes=$((C-1))-$((C))"                 # chunk boundary
+_ec_range "c2_s21"     "bytes=$((C+S21-1))-$((C+S21))"
+_ec_range "c2_s21"     "bytes=$((2*C-1))-$((2*C+S21-1))"       # chunk-2→3 + entire EC2+1 stripe
+_ec_range "c2_s21"     "bytes=0-$((2*C+S21-1))"                # full object
 
 # ── 8c: uploadPart — part sizes misaligned to EC stripes ─────────────────────
 step_time
@@ -978,41 +835,33 @@ info "Step 8c: uploadPart — part sizes misaligned to EC stripes..."
 EC_MP_PART_SIZES=($((S42+1))  $((S21+1))  $((3*S42+1))  $((C+S42/2)))
 EC_MP_PART_LABELS=("s42p1x4"  "s21p1x4"   "3s42p1x4"    "c_halfS42x4")
 
-_JOB=0
-# Phase 1: create files and upload all objects in parallel
+# Phase 1: create files and upload all objects sequentially
 for i in "${!EC_MP_PART_LABELS[@]}"; do
-    (
-        part_bytes=${EC_MP_PART_SIZES[$i]}
-        label=${EC_MP_PART_LABELS[$i]}
-        total=$((part_bytes * 4))
-        combined="$TEST_DIR/ec_mp/ec_mp_${label}.dat"
-        key="ec_mp_${label}.dat"
+    part_bytes=${EC_MP_PART_SIZES[$i]}
+    label=${EC_MP_PART_LABELS[$i]}
+    total=$((part_bytes * 4))
+    combined="$TEST_DIR/ec_mp/ec_mp_${label}.dat"
+    key="ec_mp_${label}.dat"
 
-        echo "INFO:uploadPart ec_mp_${label}: 4×${part_bytes}B = ${total}B..."
-        truncate -s "$total" "$combined"
+    info "uploadPart ec_mp_${label}: 4×${part_bytes}B = ${total}B..."
+    truncate -s "$total" "$combined"
 
-        if ! $BINARY cp $SSE_UPLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
-            echo "FAIL:uploadPart failed ec_mp_${label}"
-            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
-            exit 0
-        fi
-        echo "PASS:uploadPart ec_mp_${label} (4×${part_bytes}B = ${total}B)"
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_UPLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
+        error "uploadPart failed ec_mp_${label}" "\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
+        continue
+    fi
+    success "uploadPart ec_mp_${label} (4×${part_bytes}B = ${total}B)"
 
-        if ! _hsc_cmp "$combined" "s3://$BUCKET_NAME/$key"; then
-            echo "FAIL:uploadPart full-object integrity failed ec_mp_${label}"
-            echo "RERUN:\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
-            exit 0
-        fi
-        echo "PASS:uploadPart full-object integrity ec_mp_${label}"
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    # shellcheck disable=SC2086
+    if ! $BINARY cmp $SSE_DOWNLOAD_ARGS "$combined" "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
+        error "uploadPart full-object integrity failed ec_mp_${label}" "\$BINARY cp $SSE_UPLOAD_ARGS $combined s3://\$BUCKET_NAME/$key && \$BINARY cmp $SSE_DOWNLOAD_ARGS $combined s3://\$BUCKET_NAME/$key"
+        continue
+    fi
+    success "uploadPart full-object integrity ec_mp_${label}"
 done
-wait
-collect_results
 
-# Phase 2: getObjectRange at every EC stripe and chunk boundary — all objects × all
-# boundaries dispatched as individual parallel jobs (boundaries at or beyond EOF skipped).
-_JOB=0
+# Phase 2: getObjectRange at every EC stripe and chunk boundary — sequential
 for i in "${!EC_MP_PART_LABELS[@]}"; do
     part_bytes=${EC_MP_PART_SIZES[$i]}
     label=${EC_MP_PART_LABELS[$i]}
@@ -1025,24 +874,18 @@ for i in "${!EC_MP_PART_LABELS[@]}"; do
             boundary=$((k * stride))
             [ "$boundary" -ge "$total" ] && break
             range="bytes=$((boundary-1))-$((boundary))"
-            (
-                if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
-                    echo "INFO:Range check skipped (SSE-C): ec_mp_${label} stride=${stride} @${boundary}"
-                elif $BINARY cmp --range "$range" "$combined" \
-                        "s3://$BUCKET_NAME/$key" 2>/dev/null; then
-                    echo "PASS:getObjectRange ec_mp_${label} stride=${stride} @${boundary} OK"
-                else
-                    echo "FAIL:getObjectRange ec_mp_${label} stride=${stride} @${boundary} FAILED"
-                    echo "RERUN:\$BINARY cmp --range \"$range\" $combined s3://\$BUCKET_NAME/$key"
-                fi
-            ) > "$RESULTS_DIR/job_${_JOB}" &
-            ((_JOB++))
+            if [[ -n "$SSE_DOWNLOAD_ARGS" ]]; then
+                info "Range check skipped (SSE-C): ec_mp_${label} stride=${stride} @${boundary}"
+            elif $BINARY cmp --range "$range" "$combined" \
+                    "s3://$BUCKET_NAME/$key" >/dev/null 2>&1; then
+                success "getObjectRange ec_mp_${label} stride=${stride} @${boundary} OK"
+            else
+                error "getObjectRange ec_mp_${label} stride=${stride} @${boundary} FAILED" "\$BINARY cmp --range \"$range\" $combined s3://\$BUCKET_NAME/$key"
+            fi
             ((k++))
         done
     done
 done
-wait
-collect_results
 
 # ── 8d: copyObject at EC stripe sizes ────────────────────────────────────────
 step_time
@@ -1063,30 +906,24 @@ EC_COPY_ORIGS=("$TEST_DIR/ec/ec_s42.dat"    "$TEST_DIR/ec/ec_s21.dat"
                "$TEST_DIR/ec/ec_c_s42.dat"  "$TEST_DIR/ec/ec_c_s21.dat"
                "$TEST_DIR/ec/ec_c2_s21.dat")
 
-_JOB=0
 for i in "${!EC_COPY_SRCS[@]}"; do
-    (
-        src=${EC_COPY_SRCS[$i]}; dst=${EC_COPY_DSTS[$i]}; orig=${EC_COPY_ORIGS[$i]}
-        echo "INFO:copyObject $src → $dst..."
-        if ! $BINARY cp $SSE_COPY_ARGS "s3://$BUCKET_NAME/$src" "s3://$BUCKET_NAME/$dst" >/dev/null 2>&1; then
-            echo "FAIL:copyObject failed $src → $dst"
-            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
-            exit 0
-        fi
-        echo "PASS:copyObject $src → $dst"
-        dl="$TEST_DIR/ec_copy/$dst"
-        if $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$dst" "$dl" >/dev/null 2>&1 \
-                && $BINARY cmp "$orig" "$dl" 2>/dev/null; then
-            echo "PASS:copyObject integrity verified $dst"
-        else
-            echo "FAIL:copyObject integrity failed $dst"
-            echo "RERUN:\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cmp $SSE_DOWNLOAD_ARGS $orig s3://\$BUCKET_NAME/$dst"
-        fi
-    ) > "$RESULTS_DIR/job_${_JOB}" &
-    ((_JOB++))
+    src=${EC_COPY_SRCS[$i]}; dst=${EC_COPY_DSTS[$i]}; orig=${EC_COPY_ORIGS[$i]}
+    info "copyObject $src → $dst..."
+    # shellcheck disable=SC2086
+    if ! $BINARY cp $SSE_COPY_ARGS "s3://$BUCKET_NAME/$src" "s3://$BUCKET_NAME/$dst" >/dev/null 2>&1; then
+        error "copyObject failed $src → $dst" "\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst"
+        continue
+    fi
+    success "copyObject $src → $dst"
+    dl="$TEST_DIR/ec_copy/$dst"
+    # shellcheck disable=SC2086
+    if $BINARY cp $SSE_DOWNLOAD_ARGS "s3://$BUCKET_NAME/$dst" "$dl" >/dev/null 2>&1 \
+            && $BINARY cmp "$orig" "$dl" >/dev/null 2>&1; then
+        success "copyObject integrity verified $dst"
+    else
+        error "copyObject integrity failed $dst" "\$BINARY cp $SSE_COPY_ARGS s3://\$BUCKET_NAME/$src s3://\$BUCKET_NAME/$dst && \$BINARY cmp $SSE_DOWNLOAD_ARGS $orig s3://\$BUCKET_NAME/$dst"
+    fi
 done
-wait
-collect_results
 
 # ── Step 8e: SSE-C key validation ────────────────────────────────────────────
 # Runs only when HSC_SSE is set (AES256, sse-c, aws:kms).
@@ -1189,7 +1026,7 @@ else
 fi
 
 # Verify sync_b.dat was deleted from S3
-if $BINARY stat "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_b.dat" >/dev/null 2>&1; then
+if $BINARY exists "s3://$BUCKET_NAME/$_SYNC_PREFIX/sync_b.dat" >/dev/null 2>&1; then
     error "sync --delete: sync_b.dat still exists in S3 (should have been deleted)"
 else
     success "sync --delete: sync_b.dat correctly removed from S3"
@@ -1222,7 +1059,7 @@ if $BINARY mv $SSE_COPY_ARGS \
         "s3://$BUCKET_NAME/$_MV_SRC" "s3://$BUCKET_NAME/$_MV_DST" >/dev/null 2>&1; then
     success "mv: object renamed successfully"
     # source must be gone
-    if $BINARY stat "s3://$BUCKET_NAME/$_MV_SRC" >/dev/null 2>&1; then
+    if $BINARY exists "s3://$BUCKET_NAME/$_MV_SRC" >/dev/null 2>&1; then
         error "mv: source object still exists after mv"
     else
         success "mv: source object correctly removed"
@@ -1297,6 +1134,163 @@ fi
 # Cleanup
 $BINARY rm "s3://$BUCKET_NAME/$_MV_DST"                   >/dev/null 2>&1 || true
 $BINARY rm --recursive "s3://$BUCKET_NAME/diff_src/"       >/dev/null 2>&1 || true
+
+# ── Step 8h: new commands (exists / hash / cmp / parts) + --json output ────
+step_time
+echo ""
+info "Step 8h: new commands — exists / hash / cmp / parts + --json output..."
+
+# ── exists ────────────────────────────────────────────────────────────────────
+info "  exists: S3 object, bucket, and local-path presence checks..."
+
+_out=$($BINARY exists "s3://$BUCKET_NAME/testfile_1m.dat" 2>/dev/null || true)
+if [ "$_out" = "true" ]; then
+    success "exists: S3 object testfile_1m.dat reports true"
+else
+    error "exists: S3 object testfile_1m.dat should exist (got: '$_out')"
+fi
+
+_out=$($BINARY exists "s3://$BUCKET_NAME" 2>/dev/null || true)
+if [ "$_out" = "true" ]; then
+    success "exists: S3 bucket $BUCKET_NAME reports true"
+else
+    error "exists: S3 bucket $BUCKET_NAME should exist (got: '$_out')"
+fi
+
+_out=$($BINARY exists "s3://$BUCKET_NAME/__nonexistent_object__.dat" 2>/dev/null || true)
+if [ "$_out" = "false" ]; then
+    success "exists: nonexistent S3 object correctly reports false"
+else
+    error "exists: nonexistent S3 object should report false (got: '$_out')"
+fi
+
+_out=$($BINARY exists "$TEST_DIR/testfile_1m.dat" 2>/dev/null || true)
+if [ "$_out" = "true" ]; then
+    success "exists: local testfile_1m.dat reports true"
+else
+    error "exists: local testfile_1m.dat should exist (got: '$_out')"
+fi
+
+_json=$($BINARY exists --json "s3://$BUCKET_NAME/testfile_1m.dat" 2>/dev/null || true)
+if echo "$_json" | grep -q '"exists": true'; then
+    success "exists --json: produced JSON with exists:true"
+else
+    error "exists --json: expected JSON with exists:true (got: '$_json')"
+fi
+
+# ── hash ──────────────────────────────────────────────────────────────────────
+info "  hash: local and S3 object digests..."
+
+_local_hash=$($BINARY hash "$TEST_DIR/testfile_1k.dat" 2>/dev/null | awk '{print $2}')
+_s3_hash=$($BINARY hash "s3://$BUCKET_NAME/testfile_1k.dat" 2>/dev/null | awk '{print $2}')
+if [ -n "$_local_hash" ] && [ "$_local_hash" = "$_s3_hash" ]; then
+    success "hash: local and S3 SHA256 match ($_local_hash)"
+else
+    error "hash: local hash '$_local_hash' != S3 hash '$_s3_hash'"
+fi
+
+_md5_out=$($BINARY hash --algorithm MD5 "$TEST_DIR/testfile_1k.dat" 2>/dev/null)
+if echo "$_md5_out" | grep -q "^MD5"; then
+    success "hash --algorithm MD5: output line starts with MD5"
+else
+    error "hash --algorithm MD5: unexpected output (got: '$_md5_out')"
+fi
+
+_hash_json=$($BINARY hash --json "s3://$BUCKET_NAME/testfile_1k.dat" 2>/dev/null)
+if echo "$_hash_json" | grep -q '"algorithm"' && echo "$_hash_json" | grep -q '"value"'; then
+    success "hash --json: produced JSON with algorithm and value fields"
+else
+    error "hash --json: missing expected JSON fields (got: '$_hash_json')"
+fi
+
+# ── cmp ───────────────────────────────────────────────────────────────────────
+info "  cmp: local-to-S3 match and mismatch cases..."
+
+if $BINARY cmp "$TEST_DIR/testfile_1k.dat" "s3://$BUCKET_NAME/testfile_1k.dat" >/dev/null 2>&1; then
+    success "cmp: local testfile_1k.dat and S3 object match"
+else
+    error "cmp: local testfile_1k.dat and S3 object should match"
+fi
+
+if ! $BINARY cmp "s3://$BUCKET_NAME/testfile_1k.dat" "s3://$BUCKET_NAME/testfile_8k.dat" >/dev/null 2>&1; then
+    success "cmp: correctly detected mismatch between 1k and 8k objects"
+else
+    error "cmp: should have reported mismatch between 1k and 8k objects"
+fi
+
+_cmp_json=$($BINARY cmp --json "$TEST_DIR/testfile_1k.dat" "s3://$BUCKET_NAME/testfile_1k.dat" 2>/dev/null || true)
+if echo "$_cmp_json" | grep -q '"identical": true'; then
+    success "cmp --json: produced JSON with identical:true"
+else
+    error "cmp --json: expected JSON with identical:true (got: '$_cmp_json')"
+fi
+
+# ── parts ─────────────────────────────────────────────────────────────────────
+info "  parts: object-part metadata..."
+
+if $BINARY parts "s3://$BUCKET_NAME/testfile_1k.dat" >/dev/null 2>&1; then
+    success "parts: metadata for single-put object succeeded"
+else
+    error "parts: metadata for single-put object failed"
+fi
+
+if $BINARY parts "s3://$BUCKET_NAME/multipart_16m_parts.dat" >/dev/null 2>&1; then
+    success "parts: metadata for multipart object succeeded"
+else
+    error "parts: metadata for multipart object failed"
+fi
+
+_parts_json=$($BINARY parts --json "s3://$BUCKET_NAME/multipart_16m_parts.dat" 2>/dev/null)
+if echo "$_parts_json" | grep -q '"parts"'; then
+    success "parts --json: produced JSON with parts field"
+else
+    error "parts --json: expected JSON with parts field (got first 80 chars: '${_parts_json:0:80}')"
+fi
+
+if ! $BINARY parts "s3://$BUCKET_NAME" >/dev/null 2>&1; then
+    success "parts: correctly rejected bucket-only path (no key)"
+else
+    error "parts: should have failed on bucket-only path"
+fi
+
+# ── --json output smoke tests for existing commands ───────────────────────────
+info "  --json output: ls, stat, cmp, diff..."
+
+_ls_json=$($BINARY ls --json "s3://$BUCKET_NAME/" 2>/dev/null)
+if echo "$_ls_json" | grep -q '"key"'; then
+    success "ls --json: produced JSON with key field"
+else
+    error "ls --json: expected JSON with key field (got first 80 chars: '${_ls_json:0:80}')"
+fi
+
+_stat_json=$($BINARY stat --json "s3://$BUCKET_NAME/testfile_1k.dat" 2>/dev/null)
+if echo "$_stat_json" | grep -q '"size"'; then
+    success "stat --json: produced JSON with size field"
+else
+    error "stat --json: expected JSON with size field (got: '$_stat_json')"
+fi
+
+# shellcheck disable=SC2086
+_cmp_json=$($BINARY cmp --json $SSE_DOWNLOAD_ARGS "$TEST_DIR/testfile_1k.dat" "s3://$BUCKET_NAME/testfile_1k.dat" 2>/dev/null || true)
+if echo "$_cmp_json" | grep -q '"identical"'; then
+    success "cmp --json: produced JSON with identical field"
+else
+    error "cmp --json: expected JSON with identical field (got: '$_cmp_json')"
+fi
+
+_diff_json_dir=$(mktemp -d)
+truncate -s 1024 "$_diff_json_dir/tmp_diff_json.dat"
+# shellcheck disable=SC2086
+$BINARY cp $SSE_UPLOAD_ARGS "$_diff_json_dir/tmp_diff_json.dat" \
+    "s3://$BUCKET_NAME/diff_json_test/tmp_diff_json.dat" >/dev/null 2>&1 || true
+_diff_json=$($BINARY diff --json "$_diff_json_dir/" "s3://$BUCKET_NAME/diff_json_test/" 2>/dev/null)
+if echo "$_diff_json" | grep -q '"identical"'; then
+    success "diff --json: produced JSON with identical field"
+else
+    error "diff --json: expected JSON with identical field (got: '$_diff_json')"
+fi
+$BINARY rm "s3://$BUCKET_NAME/diff_json_test/tmp_diff_json.dat" >/dev/null 2>&1 || true
+rm -rf "$_diff_json_dir"
 
 # Step 9: Delete all objects
 step_time

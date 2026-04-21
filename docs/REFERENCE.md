@@ -69,6 +69,9 @@ hsc ls [s3://bucket[/prefix]] [--recursive]
 
 **Options:**
 - `--recursive` - List all objects recursively
+- `--versions` - List all object versions and delete markers
+- `--human-readable` - Format version-list sizes as KB/MB/GB
+- `--json` - Emit structured JSON output
 
 **Examples:**
 ```bash
@@ -76,6 +79,7 @@ hsc ls                              # List all buckets
 hsc ls s3://bucket                  # List objects in bucket
 hsc ls s3://bucket/prefix/          # List objects with prefix
 hsc ls s3://bucket/ --recursive     # List all objects recursively
+hsc ls s3://bucket/ --versions --json
 ```
 
 ### cp - Copy
@@ -188,6 +192,7 @@ hsc stat <path> [options]
 **Options:**
 - `--recursive` - Process directories/prefixes recursively
 - `--checksum [<alg>]` - Compute checksum for local files; optionally specify algorithm (CRC32, CRC32C, SHA1, SHA256); bare `--checksum` defaults to SHA256
+- `--json` - Emit structured JSON output
 
 **Local File Output:**
 - Name, Type, Size
@@ -216,6 +221,7 @@ hsc stat file.txt --checksum SHA256
 hsc stat s3://bucket/object.txt                       # S3 object info
 hsc stat s3://bucket                                  # Bucket info
 hsc stat s3://bucket/prefix/ --recursive              # All objects with prefix
+hsc stat file.txt --json                              # Machine-readable output
 ```
 
 ### diff - Difference
@@ -230,6 +236,7 @@ hsc diff <source> <dest> [options]
 - `--compare-content` - Compare by content (ETag/MD5) instead of just size
 - `--include <pattern>` - Include only files matching pattern
 - `--exclude <pattern>` - Exclude files from comparison
+- `--json` - Emit structured JSON output
 
 **Output Categories:**
 - Only in source
@@ -243,37 +250,114 @@ hsc diff ./local-dir s3://bucket/prefix/              # Compare by size
 hsc diff --compare-content ./dir1 ./dir2              # Compare by content
 hsc diff s3://bucket-a/data/ s3://bucket-b/data/      # Compare S3 locations
 hsc diff --include "*.txt" ./docs s3://bucket/docs/
+hsc diff --json ./dir1 ./dir2
 ```
 
 ### cmp - Compare
 
-Compare two files or objects byte-by-byte. Silent and exits 0 if identical; prints the first difference to stderr and exits 1 if they differ.
+Compare two files or objects byte-by-byte. On success (identical), prints `identical: true` followed by both content hashes; on failure, prints `identical: false` and the first difference. Exits `0` when identical, `1` when they differ.
 
 ```bash
 hsc cmp <path1> <path2> [options]
 ```
 
 **Options:**
+- `--algorithm <alg>` - Hash algorithm to compute when content matches: `MD5`, `CRC32`, `CRC32C`, `SHA1`, `SHA256` (default: `SHA256`). Skipped when `--range`/`--offset`/`--size` is set.
 - `--range <start-end>` - Compare a specific byte range (e.g., `0-999` or `bytes=0-999`)
 - `--offset <bytes>` - Start comparison from this byte offset
-- `--size <bytes>` - Number of bytes to compare
+- `--size <bytes>` - Number of bytes to compare (used with `--offset`)
+- `--sse-c <alg>` - SSE-C algorithm for S3 objects (AES256)
+- `--sse-c-key <key>` - Base64-encoded SSE-C customer key
+- `--json` - Emit structured JSON output
+
+**Text output (identical):**
+```
+identical: true
+algorithm: SHA256
+/path/to/file: <hex>
+s3://bucket/key: <hex>
+```
+
+**Text output (different):**
+```
+identical: false
+reason: content differs at byte N, line M
+```
 
 **Exit Codes:**
 - `0` - Files are identical (within the requested range)
-- `1` - Files differ (first differing byte and line number printed to stderr)
-
-**Output:**
-- On difference: `<path1> <path2> differ: byte N, line M` (1-based)
-- On size mismatch: `cmp: EOF on <shorter-path>`
-- On identical: no output
+- `1` - Files differ
 
 **Examples:**
 ```bash
-hsc cmp file.txt s3://bucket/file.txt          # Verify local matches S3
-hsc cmp s3://bucket/a.bin s3://bucket/b.bin    # Compare two S3 objects
-hsc cmp --range 0-999 a.bin b.bin              # Compare first 1000 bytes only
-hsc cmp --offset 512 --size 256 a.bin b.bin    # Compare bytes 512-767
-hsc cmp a.bin b.bin && echo "identical"        # Use in scripts
+hsc cmp file.txt s3://bucket/file.txt            # Verify local matches S3, print hash
+hsc cmp s3://bucket/a.bin s3://bucket/b.bin      # Compare two S3 objects
+hsc cmp --range 0-999 a.bin b.bin                # Compare first 1000 bytes only
+hsc cmp --offset 512 --size 256 a.bin b.bin      # Compare bytes 512-767
+hsc cmp --algorithm MD5 a.bin b.bin              # Use MD5 for the success hash
+hsc cmp --json a.bin s3://bucket/a.bin           # Machine-readable output
+hsc cmp a.bin b.bin && echo "identical"          # Script usage
+```
+
+### exists - Exists
+
+Test whether a local path, S3 bucket, or S3 object exists.
+
+```bash
+hsc exists <path> [--json]
+```
+
+**Behavior:**
+- Prints `true`/`false` in text mode
+- Exits `0` when the target exists, `1` when it does not
+
+**Examples:**
+```bash
+hsc exists ./file.txt
+hsc exists s3://bucket/key
+hsc exists --json s3://bucket
+```
+
+### hash - Hash
+
+Compute a digest for a local file or S3 object by streaming its content.
+
+```bash
+hsc hash <path> [--algorithm <alg>] [--json]
+```
+
+**Options:**
+- `--algorithm <alg>` - One of `MD5`, `CRC32`, `CRC32C`, `SHA1`, `SHA256` (default: `SHA256`)
+- `--json` - Emit structured JSON output
+
+**Examples:**
+```bash
+hsc hash ./file.bin
+hsc hash s3://bucket/file.bin --algorithm MD5
+hsc hash --json ./file.bin --algorithm SHA256
+```
+
+### parts - Parts
+
+Show multipart upload metadata for an S3 object. Uses `HeadObject` by default (works on any S3-compatible server); pass `--attributes` to use the AWS `GetObjectAttributes` API which additionally returns per-part checksums.
+
+```bash
+hsc parts s3://bucket/key [--attributes] [--json]
+```
+
+**Options:**
+- `--attributes` - Use `GetObjectAttributes` instead of `HeadObject` (AWS only; provides per-part checksums)
+- `--json` - Emit structured JSON output
+
+**Notes:**
+- For single-put (non-multipart) objects the part list is empty and `Parts: 1 (single-put)` is shown.
+- When `--attributes` is set, part count and per-part sizes are served directly by AWS without extra round-trips; the HeadObject path issues one request per part.
+
+**Examples:**
+```bash
+hsc parts s3://bucket/large-object.bin              # Default (HeadObject)
+hsc parts --attributes s3://bucket/large-object.bin # AWS path with checksums
+hsc parts --json s3://bucket/large-object.bin
 ```
 
 ### cat - Concatenate

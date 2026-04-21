@@ -90,6 +90,9 @@ enum Commands {
         /// Format sizes in human-readable units (KB, MB, GB); used with --versions
         #[arg(long)]
         human_readable: bool,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
     },
     /// Copy files
     Cp {
@@ -241,6 +244,9 @@ enum Commands {
         /// Checksum algorithm (ENABLED, CRC32, CRC32C, SHA1, SHA256); bare --checksum enables with default algorithm
         #[arg(long, num_args = 0..=1, default_missing_value = "ENABLED")]
         checksum: Option<String>,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
     },
     /// Compare directories or buckets and show differences
     Diff {
@@ -257,6 +263,9 @@ enum Commands {
         /// Exclude files matching pattern (can be specified multiple times)
         #[arg(long)]
         exclude: Vec<String>,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
     },
     /// Concatenate and print file or object content to STDOUT
     Cat {
@@ -279,12 +288,16 @@ enum Commands {
         version_id: Option<String>,
     },
     /// Compare two files or objects byte-by-byte
+    /// Compare two files or objects and report a structured result with a content hash on match
     Cmp {
         /// First path (local path or s3://bucket/key)
         path1: String,
         /// Second path (local path or s3://bucket/key)
         path2: String,
-        /// Byte range to compare (e.g., "0-999" or "bytes=0-999")
+        /// Hash algorithm to compute when content matches (MD5, CRC32, CRC32C, SHA1, SHA256)
+        #[arg(long, default_value = "SHA256", value_name = "ALGORITHM")]
+        algorithm: String,
+        /// Byte range to compare (e.g., "0-999" or "bytes=0-999"); hash is skipped when set
         #[arg(long)]
         range: Option<String>,
         /// Byte offset to start comparison from
@@ -299,6 +312,39 @@ enum Commands {
         /// SSE-C customer key (base64-encoded 32-byte AES key)
         #[arg(long)]
         sse_c_key: Option<String>,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Test whether a local path or S3 bucket/object exists
+    Exists {
+        /// Path (local path or s3://bucket[/key])
+        path: String,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compute a digest for a local file or S3 object
+    Hash {
+        /// Path (local file or s3://bucket/key)
+        path: String,
+        /// Hash algorithm (MD5, CRC32, CRC32C, SHA1, SHA256)
+        #[arg(long, default_value = "SHA256", value_name = "ALGORITHM")]
+        algorithm: String,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show multipart/object-part metadata for an S3 object
+    Parts {
+        /// S3 URI (s3://bucket/key)
+        path: String,
+        /// Use GetObjectAttributes API instead of HeadObject (AWS-only; provides per-part checksums)
+        #[arg(long)]
+        attributes: bool,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -427,7 +473,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             recursive,
             versions,
             human_readable,
-        } => commands::ls::list(&client, path, recursive, versions, human_readable).await,
+            json,
+        } => commands::ls::list(&client, path, recursive, versions, human_readable, json).await,
         Commands::Cp {
             source,
             dest,
@@ -574,14 +621,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             path,
             recursive,
             checksum,
-        } => commands::stat::stat(&client, &path, recursive, checksum).await,
+            json,
+        } => commands::stat::stat(&client, &path, recursive, checksum, json).await,
         Commands::Diff {
             source,
             dest,
             compare_content,
             include,
             exclude,
-        } => commands::diff::diff(&client, &source, &dest, compare_content, include, exclude).await,
+            json,
+        } => {
+            commands::diff::diff(
+                &client,
+                &source,
+                &dest,
+                compare_content,
+                include,
+                exclude,
+                json,
+            )
+            .await
+        }
         Commands::Cat {
             path,
             range,
@@ -606,25 +666,36 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Cmp {
             path1,
             path2,
+            algorithm,
             range,
             offset,
             size,
             sse_c,
             sse_c_key,
+            json,
         } => {
             commands::cmp::cmp(
                 &client,
                 &path1,
                 &path2,
+                &algorithm,
                 range,
                 offset,
                 size,
                 sse_c,
                 sse_c_key,
+                json,
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
             .await
         }
+        Commands::Exists { path, json } => commands::exists::exists(&client, &path, json).await,
+        Commands::Hash {
+            path,
+            algorithm,
+            json,
+        } => commands::hash::hash(&client, &path, &algorithm, json).await,
+        Commands::Parts { path, attributes, json } => commands::parts::parts(&client, &path, attributes, json).await,
     }
 }

@@ -2,6 +2,7 @@ use crate::filters::FileFilter;
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
 use md5::{Digest, Md5};
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::fs;
@@ -16,12 +17,36 @@ struct FileInfo {
     etag: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 enum DiffType {
     OnlyInSource,
     OnlyInDest,
     SizeDiffers,
     ContentDiffers,
+}
+
+#[derive(Serialize)]
+struct DiffEntry {
+    path: String,
+    kind: DiffType,
+}
+
+#[derive(Serialize)]
+struct DiffSummary {
+    only_in_source: usize,
+    only_in_destination: usize,
+    size_differs: usize,
+    content_differs: usize,
+    total_differences: usize,
+}
+
+#[derive(Serialize)]
+struct DiffOutput {
+    source: String,
+    dest: String,
+    identical: bool,
+    differences: Vec<DiffEntry>,
+    summary: DiffSummary,
 }
 
 /// Compare two directories or buckets and show differences
@@ -32,6 +57,7 @@ pub async fn diff(
     compare_content: bool,
     include: Vec<String>,
     exclude: Vec<String>,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source_type = parse_path(source)?;
     let dest_type = parse_path(dest)?;
@@ -45,8 +71,12 @@ pub async fn diff(
     // Find differences
     let differences = find_differences(&source_files, &dest_files, compare_content);
 
-    // Display results
-    display_differences(source, dest, &differences);
+    let output = build_output(source, dest, &differences);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        display_differences(&output);
+    }
 
     Ok(())
 }
@@ -275,17 +305,52 @@ fn find_differences(
 }
 
 /// Display differences in a readable format
-fn display_differences(source: &str, dest: &str, differences: &[(String, DiffType)]) {
-    if differences.is_empty() {
+fn build_output(source: &str, dest: &str, differences: &[(String, DiffType)]) -> DiffOutput {
+    let mut entries = Vec::with_capacity(differences.len());
+    let mut only_source = 0usize;
+    let mut only_dest = 0usize;
+    let mut size_differs = 0usize;
+    let mut content_differs = 0usize;
+
+    for (path, diff_type) in differences {
+        match diff_type {
+            DiffType::OnlyInSource => only_source += 1,
+            DiffType::OnlyInDest => only_dest += 1,
+            DiffType::SizeDiffers => size_differs += 1,
+            DiffType::ContentDiffers => content_differs += 1,
+        }
+        entries.push(DiffEntry {
+            path: path.clone(),
+            kind: diff_type.clone(),
+        });
+    }
+
+    DiffOutput {
+        source: source.to_string(),
+        dest: dest.to_string(),
+        identical: differences.is_empty(),
+        differences: entries,
+        summary: DiffSummary {
+            only_in_source: only_source,
+            only_in_destination: only_dest,
+            size_differs,
+            content_differs,
+            total_differences: differences.len(),
+        },
+    }
+}
+
+fn display_differences(output: &DiffOutput) {
+    if output.identical {
         println!("No differences found between:");
-        println!("  Source: {}", source);
-        println!("  Dest:   {}", dest);
+        println!("  Source: {}", output.source);
+        println!("  Dest:   {}", output.dest);
         return;
     }
 
     println!("Differences between:");
-    println!("  Source: {}", source);
-    println!("  Dest:   {}", dest);
+    println!("  Source: {}", output.source);
+    println!("  Dest:   {}", output.dest);
     println!();
 
     let mut only_source = Vec::new();
@@ -293,12 +358,12 @@ fn display_differences(source: &str, dest: &str, differences: &[(String, DiffTyp
     let mut size_differs = Vec::new();
     let mut content_differs = Vec::new();
 
-    for (path, diff_type) in differences {
-        match diff_type {
-            DiffType::OnlyInSource => only_source.push(path),
-            DiffType::OnlyInDest => only_dest.push(path),
-            DiffType::SizeDiffers => size_differs.push(path),
-            DiffType::ContentDiffers => content_differs.push(path),
+    for entry in &output.differences {
+        match entry.kind {
+            DiffType::OnlyInSource => only_source.push(entry.path.as_str()),
+            DiffType::OnlyInDest => only_dest.push(entry.path.as_str()),
+            DiffType::SizeDiffers => size_differs.push(entry.path.as_str()),
+            DiffType::ContentDiffers => content_differs.push(entry.path.as_str()),
         }
     }
 
@@ -335,9 +400,15 @@ fn display_differences(source: &str, dest: &str, differences: &[(String, DiffTyp
     }
 
     println!("Summary:");
-    println!("  Only in source:      {}", only_source.len());
-    println!("  Only in destination: {}", only_dest.len());
-    println!("  Size differs:        {}", size_differs.len());
-    println!("  Content differs:     {}", content_differs.len());
-    println!("  Total differences:   {}", differences.len());
+    println!("  Only in source:      {}", output.summary.only_in_source);
+    println!(
+        "  Only in destination: {}",
+        output.summary.only_in_destination
+    );
+    println!("  Size differs:        {}", output.summary.size_differs);
+    println!("  Content differs:     {}", output.summary.content_differs);
+    println!(
+        "  Total differences:   {}",
+        output.summary.total_differences
+    );
 }

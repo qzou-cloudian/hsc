@@ -1,6 +1,8 @@
 use crate::commands::cp::sse_c_key_md5;
+use crate::commands::hash::{compute_hash_for_path, HashOutput};
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
+use serde::Serialize;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -13,12 +15,142 @@ use std::sync::{
     Arc,
 };
 
-const CHUNK_SIZE: usize = 65536; // 64KB read buffer
+const CHUNK_SIZE: usize = 65536; // 64 KiB read buffer
 
-/// Compare two files or objects byte-by-byte, with optional range/offset/size.
-/// Prints nothing if identical, or the first differing byte offset if different.
+/// First-difference detail from a byte-by-byte comparison.
+#[derive(Debug, Serialize)]
+pub struct CompareDifference {
+    pub kind: String,
+    pub byte: Option<u64>,
+    pub line: Option<u64>,
+    pub shorter_path: Option<String>,
+}
+
+/// Full result returned by `compare_paths`.
+#[derive(Debug, Serialize)]
+pub struct CompareReport {
+    pub identical: bool,
+    pub path1: String,
+    pub path2: String,
+    pub range_start: Option<u64>,
+    pub range_size: Option<u64>,
+    pub bytes_compared: u64,
+    pub size1: Option<u64>,
+    pub size2: Option<u64>,
+    pub difference: Option<CompareDifference>,
+}
+
+/// JSON envelope emitted by `hsc cmp --json`.
+#[derive(Serialize)]
+struct CmpOutput {
+    identical: bool,
+    compare: CompareReport,
+    hash: Option<CmpHashPair>,
+}
+
+/// Per-path hash included in `CmpOutput` when the comparison succeeds (full-file only).
+#[derive(Serialize)]
+struct CmpHashPair {
+    algorithm: String,
+    path1: HashOutput,
+    path2: HashOutput,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn cmp(
+    client: &Client,
+    path1: &str,
+    path2: &str,
+    algorithm: &str,
+    range: Option<String>,
+    offset: Option<u64>,
+    size: Option<u64>,
+    sse_c: Option<String>,
+    sse_c_key: Option<String>,
+    json: bool,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let has_range = range.is_some() || offset.is_some() || size.is_some();
+    let compare = compare_paths(
+        client,
+        path1,
+        path2,
+        range,
+        offset,
+        size,
+        sse_c,
+        sse_c_key,
+        #[cfg(feature = "rdma")]
+        rdma,
+    )
+    .await?;
+
+    // Hash is only meaningful for a full-file comparison; skip when a byte range is active.
+    let hash = if compare.identical && !has_range {
+        Some(CmpHashPair {
+            algorithm: algorithm.to_ascii_uppercase(),
+            path1: compute_hash_for_path(client, path1, algorithm).await?,
+            path2: compute_hash_for_path(client, path2, algorithm).await?,
+        })
+    } else {
+        None
+    };
+
+    let output = CmpOutput {
+        identical: compare.identical,
+        compare,
+        hash,
+    };
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else if output.identical {
+        println!("identical: true");
+        if let Some(hash) = &output.hash {
+            println!("algorithm: {}", hash.algorithm);
+            println!("{}: {}", hash.path1.path, hash.path1.value);
+            println!("{}: {}", hash.path2.path, hash.path2.value);
+        }
+    } else {
+        println!("identical: false");
+        if let Some(difference) = &output.compare.difference {
+            print_difference(difference);
+        }
+    }
+
+    if output.identical {
+        Ok(())
+    } else {
+        std::process::exit(1);
+    }
+}
+
+fn print_difference(difference: &CompareDifference) {
+    match difference.kind.as_str() {
+        "byte_mismatch" => {
+            if let Some(byte) = difference.byte {
+                if let Some(line) = difference.line {
+                    println!("reason: content differs at byte {}, line {}", byte, line);
+                } else {
+                    println!("reason: content differs at byte {}", byte);
+                }
+            } else {
+                println!("reason: content differs");
+            }
+        }
+        "eof" => {
+            if let Some(ref shorter) = difference.shorter_path {
+                println!("reason: EOF on {}", shorter);
+            } else {
+                println!("reason: size differs");
+            }
+        }
+        _ => println!("reason: {}", difference.kind),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn compare_paths(
     client: &Client,
     path1: &str,
     path2: &str,
@@ -28,7 +160,7 @@ pub async fn cmp(
     sse_c: Option<String>,
     sse_c_key: Option<String>,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<CompareReport, Box<dyn std::error::Error>> {
     if range.is_some() && (offset.is_some() || size.is_some()) {
         return Err("Cannot specify both --range and --offset/--size".into());
     }
@@ -64,6 +196,8 @@ pub async fn cmp(
     let mut buf2 = vec![0u8; CHUNK_SIZE];
     let mut byte_pos: u64 = start.unwrap_or(0);
     let mut remaining = limit;
+    let mut line_pos: u64 = 1;
+    let mut bytes_compared = 0u64;
 
     loop {
         let to_read = remaining
@@ -77,32 +211,54 @@ pub async fn cmp(
         let n1 = read_exact_or_eof(&mut reader1, &mut buf1[..to_read]).await?;
         let n2 = read_exact_or_eof(&mut reader2, &mut buf2[..to_read]).await?;
 
-        // Compare the bytes that were actually read
         let n = n1.min(n2);
         for i in 0..n {
             if buf1[i] != buf2[i] {
-                eprintln!(
-                    "{} {} differ: byte {}, line {}",
-                    path1,
-                    path2,
-                    byte_pos + i as u64 + 1, // 1-based, like cmp(1)
-                    count_lines(&buf1[..i]) + 1
-                );
-                std::process::exit(1);
+                return Ok(CompareReport {
+                    identical: false,
+                    path1: path1.to_string(),
+                    path2: path2.to_string(),
+                    range_start: start,
+                    range_size: limit,
+                    bytes_compared,
+                    size1: (limit.is_none()).then_some(size1),
+                    size2: (limit.is_none()).then_some(size2),
+                    difference: Some(CompareDifference {
+                        kind: "byte_mismatch".to_string(),
+                        byte: Some(byte_pos + i as u64 + 1),
+                        line: Some(line_pos + count_lines(&buf1[..i])),
+                        shorter_path: None,
+                    }),
+                });
             }
         }
 
+        bytes_compared += n as u64;
         byte_pos += n as u64;
+        line_pos += count_lines(&buf1[..n]);
 
-        // Handle EOF differences
         if n1 != n2 {
             let shorter = if n1 < n2 { path1 } else { path2 };
-            eprintln!("cmp: EOF on {}", shorter);
-            std::process::exit(1);
+            return Ok(CompareReport {
+                identical: false,
+                path1: path1.to_string(),
+                path2: path2.to_string(),
+                range_start: start,
+                range_size: limit,
+                bytes_compared,
+                size1: (limit.is_none()).then_some(size1),
+                size2: (limit.is_none()).then_some(size2),
+                difference: Some(CompareDifference {
+                    kind: "eof".to_string(),
+                    byte: None,
+                    line: None,
+                    shorter_path: Some(shorter.to_string()),
+                }),
+            });
         }
 
         if n1 == 0 {
-            break; // both EOF
+            break;
         }
 
         if let Some(ref mut r) = remaining {
@@ -110,20 +266,39 @@ pub async fn cmp(
         }
     }
 
-    // When no range is given, also compare total sizes
     if limit.is_none() && size1 != size2 {
         let shorter = if size1 < size2 { path1 } else { path2 };
-        eprintln!("cmp: EOF on {}", shorter);
-        std::process::exit(1);
+        return Ok(CompareReport {
+            identical: false,
+            path1: path1.to_string(),
+            path2: path2.to_string(),
+            range_start: start,
+            range_size: limit,
+            bytes_compared,
+            size1: Some(size1),
+            size2: Some(size2),
+            difference: Some(CompareDifference {
+                kind: "eof".to_string(),
+                byte: None,
+                line: None,
+                shorter_path: Some(shorter.to_string()),
+            }),
+        });
     }
 
-    // Files are identical (within range)
-    Ok(())
+    Ok(CompareReport {
+        identical: true,
+        path1: path1.to_string(),
+        path2: path2.to_string(),
+        range_start: start,
+        range_size: limit,
+        bytes_compared,
+        size1: (limit.is_none()).then_some(size1),
+        size2: (limit.is_none()).then_some(size2),
+        difference: None,
+    })
 }
 
-// ── helpers ──────────────────────────────────────────────────────────────────
-
-/// Parse range/offset/size into (start, limit) byte counts.
 fn resolve_range(
     range: Option<String>,
     offset: Option<u64>,
@@ -155,12 +330,9 @@ fn resolve_range(
     }
 }
 
-/// Count newlines in a byte slice (for line-number reporting).
 fn count_lines(buf: &[u8]) -> u64 {
     buf.iter().filter(|&&b| b == b'\n').count() as u64
 }
-
-// ── abstracted reader ─────────────────────────────────────────────────────────
 
 struct Reader {
     inner: ReaderInner,
@@ -172,7 +344,6 @@ enum ReaderInner {
     S3 { data: Vec<u8>, pos: usize },
 }
 
-/// Open a local file or S3 object as a Reader, seeking/slicing to the given start.
 async fn open_reader(
     client: &Client,
     path: &str,
@@ -205,10 +376,6 @@ async fn open_reader(
                 return Err(format!("'{}' is an S3 bucket, not an object", path).into());
             }
 
-            // HEAD is only needed for a full-file comparison (to detect size differences
-            // before streaming).  When a range/size limit is already known, skip it —
-            // total_size is unused in that code path and the HEAD would be a wasted request
-            // (especially costly when many range-checks run in parallel).
             let total_size = if limit.is_none() {
                 let mut head_req = client.head_object().bucket(&bucket).key(&key);
                 if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
@@ -224,23 +391,17 @@ async fn open_reader(
                     .map_err(|e| format!("Cannot stat s3://{}/{}: {}", bucket, key, e))?;
                 head.content_length().unwrap_or(0) as u64
             } else {
-                // Range-limited: total_size is never used, skip HEAD.
                 0
             };
 
-            // Byte count for this particular request (may be a sub-range).
-            // Only used in the RDMA path below; suppress the warning for non-rdma builds.
             #[cfg_attr(not(feature = "rdma"), allow(unused_variables))]
             let byte_count = limit.unwrap_or(total_size) as usize;
-
-            // Build Range header
             let range_hdr = build_range_header(start, limit);
 
-            // Try RDMA path when a provider is supplied.
             #[cfg(feature = "rdma")]
             if let Some(ref provider) = rdma {
                 let mut buffer: Vec<u8> = vec![0u8; byte_count];
-                let raw_ptr = buffer.as_mut_ptr(); // save before any potential move
+                let raw_ptr = buffer.as_mut_ptr();
                 let suitable =
                     byte_count > 0 && provider.is_memory_suitable(buffer.as_ptr(), byte_count);
                 if suitable {
@@ -277,7 +438,6 @@ async fn open_reader(
                 } else {
                     resp.body.collect().await?.into_bytes().to_vec()
                 };
-                // deregister via the raw pointer (buffer may have been moved into `bytes`)
                 if suitable {
                     let _ = provider.deregister_memory(raw_ptr);
                 }
@@ -322,7 +482,6 @@ fn build_range_header(start: Option<u64>, limit: Option<u64>) -> Option<String> 
     }
 }
 
-/// Read up to `buf.len()` bytes; return how many were actually read (0 = EOF).
 async fn read_exact_or_eof(
     reader: &mut Reader,
     buf: &mut [u8],

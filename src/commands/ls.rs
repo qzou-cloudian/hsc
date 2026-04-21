@@ -1,19 +1,88 @@
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
 use aws_smithy_types::date_time::Format;
+use serde::Serialize;
 
-/// List S3 buckets or objects
+#[derive(Serialize)]
+struct BucketEntry {
+    name: String,
+    creation_date: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ListBucketsOutput {
+    buckets: Vec<BucketEntry>,
+    total_buckets: usize,
+}
+
+#[derive(Serialize)]
+struct PrefixEntry {
+    key: String,
+    kind: String,
+}
+
+#[derive(Serialize)]
+struct ObjectEntry {
+    key: String,
+    last_modified: Option<String>,
+    size: i64,
+}
+
+#[derive(Serialize)]
+struct ListObjectsOutput {
+    bucket: String,
+    prefix: String,
+    recursive: bool,
+    prefixes: Vec<PrefixEntry>,
+    objects: Vec<ObjectEntry>,
+    total_objects: usize,
+    total_size: i64,
+}
+
+#[derive(Serialize)]
+struct VersionEntry {
+    key: String,
+    version_id: String,
+    latest: bool,
+    kind: String,
+    last_modified: Option<String>,
+    size: Option<i64>,
+    size_display: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ListVersionsOutput {
+    bucket: String,
+    prefix: String,
+    versions: Vec<VersionEntry>,
+}
+
 pub async fn list(
     client: &Client,
     path: Option<String>,
     recursive: bool,
     versions: bool,
     human_readable: bool,
+    json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match path {
         None => {
-            // List all buckets — --versions / --human-readable don't apply here
-            list_buckets(client).await
+            let output = list_buckets(client).await?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&output)?);
+            } else if output.buckets.is_empty() {
+                println!("No buckets found");
+            } else {
+                for bucket in &output.buckets {
+                    println!(
+                        "{:30} {}",
+                        bucket.creation_date.as_deref().unwrap_or("N/A"),
+                        bucket.name
+                    );
+                }
+                println!("\nTotal buckets: {}", output.total_buckets);
+            }
+            Ok(())
         }
         Some(path_str) => {
             let path_type = parse_path(&path_str)?;
@@ -25,10 +94,47 @@ pub async fn list(
                                 "Warning: --recursive is ignored when --versions is specified"
                             );
                         }
-                        list_object_versions(client, &bucket, &key, human_readable).await
+                        let output =
+                            list_object_versions(client, &bucket, &key, human_readable).await?;
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&output)?);
+                        } else {
+                            println!("KEY\tVERSION-ID\tLATEST\tTYPE\tLAST-MODIFIED\tSIZE");
+                            for entry in &output.versions {
+                                println!(
+                                    "{}\t{}\t{}\t{}\t{}\t{}",
+                                    entry.key,
+                                    entry.version_id,
+                                    entry.latest,
+                                    entry.kind,
+                                    entry.last_modified.as_deref().unwrap_or("N/A"),
+                                    entry.size_display.as_deref().unwrap_or("-"),
+                                );
+                            }
+                        }
                     } else {
-                        list_objects(client, &bucket, &key, recursive).await
+                        let output = list_objects(client, &bucket, &key, recursive).await?;
+                        if json {
+                            println!("{}", serde_json::to_string_pretty(&output)?);
+                        } else {
+                            for prefix in &output.prefixes {
+                                println!("{:>20} {}", "PRE", prefix.key);
+                            }
+                            for object in &output.objects {
+                                println!(
+                                    "{:30} {:>12} {}",
+                                    object.last_modified.as_deref().unwrap_or("N/A"),
+                                    object.size,
+                                    object.key
+                                );
+                            }
+                            println!(
+                                "\nTotal objects: {}, Total size: {} bytes",
+                                output.total_objects, output.total_size
+                            );
+                        }
                     }
+                    Ok(())
                 }
                 PathType::Local(_) => {
                     Err("ls command requires S3 URI (s3://bucket[/prefix])".into())
@@ -38,79 +144,68 @@ pub async fn list(
     }
 }
 
-/// List all S3 buckets
-async fn list_buckets(client: &Client) -> Result<(), Box<dyn std::error::Error>> {
+async fn list_buckets(client: &Client) -> Result<ListBucketsOutput, Box<dyn std::error::Error>> {
     let response = client.list_buckets().send().await?;
+    let buckets = response
+        .buckets()
+        .iter()
+        .map(|bucket| BucketEntry {
+            name: bucket.name().unwrap_or_default().to_string(),
+            creation_date: bucket.creation_date().map(|d| d.to_string()),
+        })
+        .collect::<Vec<_>>();
 
-    let buckets = response.buckets();
-    if buckets.is_empty() {
-        println!("No buckets found");
-    } else {
-        for bucket in buckets {
-            if let Some(name) = bucket.name() {
-                let creation_date = bucket
-                    .creation_date()
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "N/A".to_string());
-                println!("{:30} {}", creation_date, name);
-            }
-        }
-        println!("\nTotal buckets: {}", buckets.len());
-    }
-
-    Ok(())
+    Ok(ListBucketsOutput {
+        total_buckets: buckets.len(),
+        buckets,
+    })
 }
 
-/// List objects in a bucket with optional prefix
 async fn list_objects(
     client: &Client,
     bucket: &str,
     prefix: &str,
     recursive: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<ListObjectsOutput, Box<dyn std::error::Error>> {
     let mut continuation_token: Option<String> = None;
-    let mut total_count = 0;
     let mut total_size = 0i64;
+    let mut prefixes = Vec::new();
+    let mut objects = Vec::new();
 
     loop {
         let mut request = client.list_objects_v2().bucket(bucket);
-
         if !prefix.is_empty() {
             request = request.prefix(prefix);
         }
-
         if !recursive {
-            // Use delimiter to get only immediate children
             request = request.delimiter("/");
         }
-
         if let Some(token) = continuation_token {
             request = request.continuation_token(token);
         }
 
         let response = request.send().await?;
 
-        // List common prefixes (directories) when not recursive
         if !recursive {
             for common_prefix in response.common_prefixes() {
                 if let Some(prefix_str) = common_prefix.prefix() {
-                    println!("{:>20} {}", "PRE", prefix_str);
+                    prefixes.push(PrefixEntry {
+                        key: prefix_str.to_string(),
+                        kind: "prefix".to_string(),
+                    });
                 }
             }
         }
 
-        // List objects
         for obj in response.contents() {
             if let Some(key) = obj.key() {
                 let size = obj.size().unwrap_or(0);
-                let last_modified = obj
-                    .last_modified()
-                    .map(|d| d.to_string())
-                    .unwrap_or_else(|| "N/A".to_string());
-
-                println!("{:30} {:>12} {}", last_modified, size, key);
-                total_count += 1;
                 total_size += size;
+                objects.push(ObjectEntry {
+                    key: key.to_string(),
+                    last_modified: obj.last_modified().map(|d| d.to_string()),
+                    size,
+                });
             }
         }
 
@@ -121,28 +216,29 @@ async fn list_objects(
         }
     }
 
-    println!(
-        "\nTotal objects: {}, Total size: {} bytes",
-        total_count, total_size
-    );
-    Ok(())
+    Ok(ListObjectsOutput {
+        bucket: bucket.to_string(),
+        prefix: prefix.to_string(),
+        recursive,
+        total_objects: objects.len(),
+        total_size,
+        prefixes,
+        objects,
+    })
 }
 
-/// List all versions and delete markers for a bucket/prefix
 async fn list_object_versions(
     client: &Client,
     bucket: &str,
     prefix: &str,
     human_readable: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("KEY\tVERSION-ID\tLATEST\tTYPE\tLAST-MODIFIED\tSIZE");
-
+) -> Result<ListVersionsOutput, Box<dyn std::error::Error>> {
     let mut key_marker: Option<String> = None;
     let mut version_id_marker: Option<String> = None;
+    let mut versions = Vec::new();
 
     loop {
         let mut req = client.list_object_versions().bucket(bucket);
-
         if !prefix.is_empty() {
             req = req.prefix(prefix);
         }
@@ -156,36 +252,30 @@ async fn list_object_versions(
         let resp = req.send().await?;
 
         for v in resp.versions() {
-            let key = v.key().unwrap_or("");
-            let version_id = v.version_id().unwrap_or("");
-            let is_latest = v.is_latest().unwrap_or(false);
-            let last_modified = v
-                .last_modified()
-                .and_then(|d| d.fmt(Format::DateTime).ok())
-                .unwrap_or_else(|| "N/A".to_string());
             let size = v.size().unwrap_or(0);
-            println!(
-                "{}\t{}\t{}\tVersion\t{}\t{}",
-                key,
-                version_id,
-                is_latest,
-                last_modified,
-                format_size(size, human_readable)
-            );
+            versions.push(VersionEntry {
+                key: v.key().unwrap_or_default().to_string(),
+                version_id: v.version_id().unwrap_or_default().to_string(),
+                latest: v.is_latest().unwrap_or(false),
+                kind: "Version".to_string(),
+                last_modified: v.last_modified().and_then(|d| d.fmt(Format::DateTime).ok()),
+                size: Some(size),
+                size_display: Some(format_size(size, human_readable)),
+            });
         }
 
         for dm in resp.delete_markers() {
-            let key = dm.key().unwrap_or("");
-            let version_id = dm.version_id().unwrap_or("");
-            let is_latest = dm.is_latest().unwrap_or(false);
-            let last_modified = dm
-                .last_modified()
-                .and_then(|d| d.fmt(Format::DateTime).ok())
-                .unwrap_or_else(|| "N/A".to_string());
-            println!(
-                "{}\t{}\t{}\tDeleteMarker\t{}\t-",
-                key, version_id, is_latest, last_modified
-            );
+            versions.push(VersionEntry {
+                key: dm.key().unwrap_or_default().to_string(),
+                version_id: dm.version_id().unwrap_or_default().to_string(),
+                latest: dm.is_latest().unwrap_or(false),
+                kind: "DeleteMarker".to_string(),
+                last_modified: dm
+                    .last_modified()
+                    .and_then(|d| d.fmt(Format::DateTime).ok()),
+                size: None,
+                size_display: Some("-".to_string()),
+            });
         }
 
         if resp.is_truncated() == Some(true) {
@@ -196,7 +286,11 @@ async fn list_object_versions(
         }
     }
 
-    Ok(())
+    Ok(ListVersionsOutput {
+        bucket: bucket.to_string(),
+        prefix: prefix.to_string(),
+        versions,
+    })
 }
 
 fn format_size(bytes: i64, human_readable: bool) -> String {
