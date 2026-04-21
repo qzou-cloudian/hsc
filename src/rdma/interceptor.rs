@@ -205,21 +205,36 @@ impl Intercept for RdmaInterceptor {
         let reply_header =
             String::from_utf8_lossy(self.provider.rdma_reply_header_name()).into_owned();
 
-        if let Some(reply_token) = context.response().headers().get(&reply_header) {
+        if let Some(reply_header_value) = context.response().headers().get(&reply_header) {
             if self.debug {
                 eprintln!(
-                    "[RdmaInterceptor] RDMA reply received ({} bytes)",
-                    reply_token.len()
+                    "[RdmaInterceptor] RDMA reply received: '{}'",
+                    reply_header_value
                 );
             }
             self.rdma_confirmed.store(true, Ordering::Release);
 
+            // Parse the reply header as a numeric HTTP status code (200/204/206 = success, 501 = fallback).
+            let rdma_status: u16 = reply_header_value.trim().parse().unwrap_or(0);
+
+            // Read the byte-count header (x-amz-rdma-bytes) if present.
+            let bytes_header =
+                String::from_utf8_lossy(self.provider.rdma_bytes_header_name()).into_owned();
+            let transferred: usize = context
+                .response()
+                .headers()
+                .get(&bytes_header)
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(self.size);
+
             let provider = Arc::clone(&self.provider);
-            let token_bytes = reply_token.as_bytes().to_vec();
+            let request_token = self.token.clone();
             let debug = self.debug;
             provider
-                .process_reply_token(
-                    &token_bytes,
+                .process_rdma_reply(
+                    rdma_status,
+                    &request_token,
+                    transferred,
                     Box::new(move |result| {
                         if result.error_code != 0 {
                             eprintln!("[RdmaInterceptor] RDMA error (code={})", result.error_code);
