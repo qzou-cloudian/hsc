@@ -696,6 +696,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             algorithm,
             json,
         } => commands::hash::hash(&client, &path, &algorithm, json).await,
-        Commands::Parts { path, attributes, json } => commands::parts::parts(&client, &path, attributes, json).await,
+        Commands::Parts {
+            path,
+            attributes,
+            json,
+        } => commands::parts::parts(&client, &path, attributes, json).await,
     }
 }

@@ -38,9 +38,7 @@ pub async fn stat(
                 } else if json_output {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(
-                            &stat_bucket_json(client, &bucket).await?
-                        )?
+                        serde_json::to_string_pretty(&stat_bucket_json(client, &bucket).await?)?
                     );
                     Ok(())
                 } else {
@@ -59,16 +57,14 @@ pub async fn stat(
                     stat_s3_recursive(client, &bucket, &key).await
                 }
             } else if json_output {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &stat_object_json(client, &bucket, &key).await?
-                        )?
-                    );
-                    Ok(())
-                } else {
-                    stat_object(client, &bucket, &key).await
-                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stat_object_json(client, &bucket, &key).await?)?
+                );
+                Ok(())
+            } else {
+                stat_object(client, &bucket, &key).await
+            }
         }
         PathType::Local(local_path) => {
             if recursive {
@@ -84,16 +80,14 @@ pub async fn stat(
                     stat_local_recursive(&local_path, checksum).await
                 }
             } else if json_output {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(
-                            &stat_local_json(&local_path, checksum).await?
-                        )?
-                    );
-                    Ok(())
-                } else {
-                    stat_local(&local_path, checksum).await
-                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&stat_local_json(&local_path, checksum).await?)?
+                );
+                Ok(())
+            } else {
+                stat_local(&local_path, checksum).await
+            }
         }
     }
 }
