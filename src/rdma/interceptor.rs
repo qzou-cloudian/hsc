@@ -56,9 +56,9 @@ const CHECKSUM_HEADERS: &[&str] = &[
 ///    `rdma_confirmed` so the caller knows to use the pre-filled RDMA buffer.
 pub struct RdmaInterceptor {
     provider: Arc<dyn RdmaProvider>,
-    /// Pre-generated RDMA descriptor token.
+    /// Pre-generated RDMA descriptor token (may be `|`-separated for multi-token).
     token: Vec<u8>,
-    /// Byte count for the transfer (sent as `x-amz-rdma-size`).
+    /// Byte count for the transfer (fallback for `x-amz-rdma-bytes` when absent).
     size: usize,
     /// Set to `true` by the interceptor when the server confirms RDMA.
     rdma_confirmed: Arc<AtomicBool>,
@@ -67,6 +67,9 @@ pub struct RdmaInterceptor {
     checksum_algorithm: Option<String>,
     /// Base64-encoded precomputed checksum of the data, if requested.
     checksum_value: Option<String>,
+    /// Per-token sizes for multi-token transfers, injected as `x-amz-rdma-sizes`.
+    /// `None` for single-token transfers (no header injected).
+    sizes: Option<Vec<u8>>,
 }
 
 impl std::fmt::Debug for RdmaInterceptor {
@@ -104,6 +107,7 @@ impl RdmaInterceptor {
             debug,
             checksum_algorithm,
             checksum_value,
+            sizes: None,
         }
     }
 
@@ -123,7 +127,19 @@ impl RdmaInterceptor {
             debug,
             checksum_algorithm: None,
             checksum_value: None,
+            sizes: None,
         }
+    }
+
+    /// Attach per-token sizes for a multi-token transfer.
+    ///
+    /// The `sizes` bytes are injected as the `x-amz-rdma-sizes` request header
+    /// (a `|`-separated list of decimal byte counts, one per token).  Call this
+    /// after [`new_put`](Self::new_put) or [`new_get`](Self::new_get) when more
+    /// than one RDMA token is packed into the `x-amz-rdma-token` header.
+    pub fn with_sizes(mut self, sizes: Vec<u8>) -> Self {
+        self.sizes = Some(sizes);
+        self
     }
 }
 
@@ -191,6 +207,19 @@ impl Intercept for RdmaInterceptor {
 
         let headers = context.request_mut().headers_mut();
         headers.insert(header_name, token_value);
+
+        // Inject per-token sizes for multi-token transfers.
+        if let Some(ref sizes_val) = self.sizes {
+            let sizes_header_name =
+                String::from_utf8_lossy(self.provider.rdma_sizes_header_name()).into_owned();
+            let sizes_str = String::from_utf8_lossy(sizes_val).into_owned();
+            if self.debug {
+                eprintln!(
+                    "[RdmaInterceptor] injecting '{sizes_header_name}': '{sizes_str}'"
+                );
+            }
+            headers.insert(sizes_header_name, sizes_str);
+        }
 
         Ok(())
     }

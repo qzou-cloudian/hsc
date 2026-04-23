@@ -332,18 +332,57 @@ pub async fn upload_file(
             if suitable {
                 provider.register_memory(buffer.as_mut_ptr(), size)?;
             }
-            let maybe_token = if suitable {
+            let maybe_token: Option<(Vec<u8>, Option<Vec<u8>>)> = if suitable {
                 let s3_key = format!("{bucket}/{key}");
-                match provider.prepare_put_token(s3_key.as_bytes(), buffer.as_ptr(), size, 0) {
-                    Ok(t) => Some(t),
-                    Err(e) => {
-                        if e.is_fallback_eligible() {
-                            eprintln!(
-                                "[rdma] prepare_put_token failed ({e}); falling back to plain HTTP"
-                            );
-                        } else {
-                            eprintln!("[rdma] prepare_put_token error ({e})");
+                let max_transfer = provider.get_max_transfer_size(buffer.as_ptr());
+                if size <= max_transfer {
+                    // Single token — existing behaviour.
+                    match provider.prepare_put_token(s3_key.as_bytes(), buffer.as_ptr(), size, 0) {
+                        Ok(t) => Some((t, None)),
+                        Err(e) => {
+                            if e.is_fallback_eligible() {
+                                eprintln!(
+                                    "[rdma] prepare_put_token failed ({e}); falling back to plain HTTP"
+                                );
+                            } else {
+                                eprintln!("[rdma] prepare_put_token error ({e})");
+                            }
+                            None
                         }
+                    }
+                } else {
+                    // Buffer exceeds provider's single-token limit — split into N tokens.
+                    let mut tok_strs = Vec::new();
+                    let mut sz_strs  = Vec::new();
+                    let mut off = 0usize;
+                    let mut ok  = true;
+                    while off < size {
+                        let n = max_transfer.min(size - off);
+                        // SAFETY: off < size and buffer has `size` bytes allocated.
+                        let ptr = unsafe { buffer.as_ptr().add(off) };
+                        match provider.prepare_put_token(s3_key.as_bytes(), ptr, n, 0) {
+                            Ok(tok) => {
+                                tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
+                                sz_strs.push(n.to_string());
+                                off += n;
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[rdma] prepare_put_token failed for multi-token \
+                                     (tok={}, {e}); falling back to plain HTTP",
+                                    tok_strs.len()
+                                );
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        Some((
+                            tok_strs.join("|").into_bytes(),
+                            Some(sz_strs.join("|").into_bytes()),
+                        ))
+                    } else {
                         None
                     }
                 }
@@ -354,14 +393,14 @@ pub async fn upload_file(
             // Use an empty body so content-length is 0 and x-amz-content-sha256
             // reflects SHA256 of the empty string, as the server expects.
             let rdma_body = ByteStream::from_static(b"");
-            if let Some(token) = maybe_token {
+            if let Some((token, sizes)) = maybe_token {
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
                 let (cksum_alg, cksum_val) = compute_put_checksum(
                     &buffer,
                     checksum_mode.as_ref(),
                     checksum_algorithm.as_ref(),
                 );
-                let interceptor = RdmaInterceptor::new_put(
+                let mut interceptor = RdmaInterceptor::new_put(
                     Arc::clone(provider),
                     token,
                     size,
@@ -370,6 +409,9 @@ pub async fn upload_file(
                     cksum_alg,
                     cksum_val,
                 );
+                if let Some(sz) = sizes {
+                    interceptor = interceptor.with_sizes(sz);
+                }
                 client
                     .put_object()
                     .bucket(bucket)
@@ -814,11 +856,43 @@ pub async fn download_file(
         if suitable {
             provider.register_memory(buffer.as_mut_ptr(), size)?;
         }
-        let maybe_token = if suitable {
+        let maybe_token: Option<(Vec<u8>, Option<Vec<u8>>)> = if suitable {
             let s3_key = format!("{bucket}/{key}");
-            provider
-                .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), size, 0)
-                .ok()
+            let max_transfer = provider.get_max_transfer_size(buffer.as_ptr());
+            if size <= max_transfer {
+                // Single token — existing behaviour.
+                provider
+                    .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), size, 0)
+                    .ok()
+                    .map(|t| (t, None))
+            } else {
+                // Buffer exceeds provider's single-token limit — split into N tokens.
+                let mut tok_strs = Vec::new();
+                let mut sz_strs  = Vec::new();
+                let mut off = 0usize;
+                let mut ok  = true;
+                while off < size {
+                    let n = max_transfer.min(size - off);
+                    // SAFETY: off < size and buffer has `size` bytes allocated.
+                    let ptr = unsafe { buffer.as_mut_ptr().add(off) };
+                    match provider.prepare_get_token(s3_key.as_bytes(), ptr, n, 0) {
+                        Ok(tok) => {
+                            tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
+                            sz_strs.push(n.to_string());
+                            off += n;
+                        }
+                        Err(_) => { ok = false; break; }
+                    }
+                }
+                if ok {
+                    Some((
+                        tok_strs.join("|").into_bytes(),
+                        Some(sz_strs.join("|").into_bytes()),
+                    ))
+                } else {
+                    None
+                }
+            }
         } else {
             None
         };
@@ -838,14 +912,17 @@ pub async fn download_file(
             }
         }
         let rdma_confirmed = Arc::new(AtomicBool::new(false));
-        let response = if let Some(token) = maybe_token {
-            let interceptor = RdmaInterceptor::new_get(
+        let response = if let Some((token, sizes)) = maybe_token {
+            let mut interceptor = RdmaInterceptor::new_get(
                 Arc::clone(provider),
                 token,
                 size,
                 Arc::clone(&rdma_confirmed),
                 false,
             );
+            if let Some(sz) = sizes {
+                interceptor = interceptor.with_sizes(sz);
+            }
             request.customize().interceptor(interceptor).send().await?
         } else {
             request.send().await?
