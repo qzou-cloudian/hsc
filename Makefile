@@ -56,7 +56,7 @@ cargo build --release $(if $(FEATURES),--features $(FEATURES)) \
     --target-dir /cargo/target; \
 cp /cargo/target/release/hsc /out/; \
 if echo "$(FEATURES)" | grep -q cuobj; then \
-    cargo build --release --locked \
+    cargo build --release \
         --manifest-path ../s3-rdma/providers/cuobj-client/Cargo.toml \
         --target-dir /cargo/target-cuobj; \
     cp /cargo/target-cuobj/release/libs3_rdma_cuobj_client.so /out/; \
@@ -68,7 +68,7 @@ define DOCKER_RUN_FLAGS
 --rm \
 -v "$(HSC_DIR):/build/hsc:ro" \
 -v "$(CUOBJ_SRC):/build/cuobj:ro" \
--v "$(S3RDMA_SRC):/build/s3-rdma:ro" \
+-v "$(S3RDMA_SRC):/build/s3-rdma" \
 -v "$(CUDA_DIR):/usr/local/cuda:ro" \
 -v "$(CARGO_REGISTRY):/root/.cargo/registry" \
 -v "$(CARGO_GIT):/root/.cargo/git"
