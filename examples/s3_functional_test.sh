@@ -1398,3 +1398,7 @@ else
     echo -e "${BLUE}Rerun script written to: $_rerun_script${NC}"
 fi
 echo "========================================="
+
+# Exit with non-zero status if any tests failed so callers (CI, run_test.sh,
+# tcp_tests.sh) can detect failure via the process exit code.
+[ $ERROR_COUNT -eq 0 ]
