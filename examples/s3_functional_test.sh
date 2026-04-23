@@ -12,23 +12,23 @@ if [[ -n "$HSC_RDMA" && "$HSC_RDMA" != "false" && "$HSC_RDMA" != "0" ]]; then
         echo "HSC_RDMA=$HSC_RDMA detected — building with --features cuobj ..."
         cargo build --features cuobj 2>&1 | tail -3
 
-        # Build libs3_rdma_cuobj.so and copy it next to the hsc binary so that
+        # Build libs3_rdma_cuobj_client.so and copy it next to the hsc binary so that
         # the runtime loader finds it via the "exe dir" search path.
-        _CUOBJ_SRC="${CUOBJ_SRC:-$(cd "$(dirname "$0")/../.." && pwd)/s3-rdma/providers/cuobj}"
+        _CUOBJ_SRC="${CUOBJ_SRC:-$(cd "$(dirname "$0")/../.." && pwd)/s3-rdma/providers/cuobj-client}"
         if [[ -d "$_CUOBJ_SRC" ]]; then
-            echo "Building libs3_rdma_cuobj.so from $_CUOBJ_SRC ..."
+            echo "Building libs3_rdma_cuobj_client.so from $_CUOBJ_SRC ..."
             CUOBJ_ROOT_DIR="${CUOBJ_ROOT_DIR:-/usr/local/cuda}" \
                 cargo build --manifest-path "$_CUOBJ_SRC/Cargo.toml" \
                     --target-dir "./target/cuobj-build" 2>&1 | tail -3
-            _SO="./target/cuobj-build/debug/libs3_rdma_cuobj.so"
+            _SO="./target/cuobj-build/debug/libs3_rdma_cuobj_client.so"
             if [[ -f "$_SO" ]]; then
                 cp "$_SO" "./target/debug/"
-                echo "Copied libs3_rdma_cuobj.so → ./target/debug/"
+                echo "Copied libs3_rdma_cuobj_client.so → ./target/debug/"
             else
-                echo "Warning: libs3_rdma_cuobj.so not produced — RDMA may fall back to standard I/O"
+                echo "Warning: libs3_rdma_cuobj_client.so not produced — RDMA may fall back to standard I/O"
             fi
         else
-            echo "Warning: cuobj source not found at $_CUOBJ_SRC — skipping libs3_rdma_cuobj.so build"
+            echo "Warning: cuobj-client source not found at $_CUOBJ_SRC — skipping libs3_rdma_cuobj_client.so build"
         fi
     else
         echo "HSC_RDMA=$HSC_RDMA detected — building with --features rdma ..."

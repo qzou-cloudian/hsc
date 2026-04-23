@@ -2,7 +2,7 @@
 # Package pre-built hsc artifacts as a DEB for Ubuntu 24.04.
 #
 # Expected bind-mounts:
-#   /pkg  — dist/ubuntu-24.04/ directory containing hsc (and optionally libs3_rdma_cuobj.so)
+#   /pkg  — dist/ubuntu-24.04/ directory containing hsc (and optionally libs3_rdma_cuobj_client.so)
 #
 # Required environment:
 #   VERSION — package version string (e.g. "0.2.0")
@@ -10,7 +10,7 @@ set -e
 
 VERSION=${VERSION:?VERSION env var must be set}
 BINARY=/pkg/hsc
-SO=/pkg/libs3_rdma_cuobj.so
+SO=/pkg/libs3_rdma_cuobj_client.so
 
 echo "==> Packaging hsc v${VERSION} as DEB (Ubuntu 24.04)"
 
@@ -24,8 +24,8 @@ install -m755 "$BINARY" "${PKG_DIR}/usr/bin/hsc"
 
 if [ -f "$SO" ]; then
     mkdir -p "${PKG_DIR}/usr/lib"
-    install -m755 "$SO" "${PKG_DIR}/usr/lib/libs3_rdma_cuobj.so"
-    echo "==> Including libs3_rdma_cuobj.so"
+    install -m755 "$SO" "${PKG_DIR}/usr/lib/libs3_rdma_cuobj_client.so"
+    echo "==> Including libs3_rdma_cuobj_client.so"
 fi
 
 INSTALLED_SIZE=$(du -sk "${PKG_DIR}/usr" | cut -f1)

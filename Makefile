@@ -56,10 +56,10 @@ cargo build --release $(if $(FEATURES),--features $(FEATURES)) \
     --target-dir /cargo/target; \
 cp /cargo/target/release/hsc /out/; \
 if echo "$(FEATURES)" | grep -q cuobj; then \
-    cargo build --release \
-        --manifest-path ../s3-rdma/providers/cuobj/Cargo.toml \
+    cargo build --release --locked \
+        --manifest-path ../s3-rdma/providers/cuobj-client/Cargo.toml \
         --target-dir /cargo/target-cuobj; \
-    cp /cargo/target-cuobj/release/libs3_rdma_cuobj.so /out/; \
+    cp /cargo/target-cuobj/release/libs3_rdma_cuobj_client.so /out/; \
 fi
 endef
 
@@ -100,7 +100,7 @@ docker-images:
 
 # ── Packaging ─────────────────────────────────────────────────────────────────
 # Builds distribution packages from the pre-compiled binaries produced by
-# 'make rocky' / 'make ubuntu'.  Both hsc and libs3_rdma_cuobj.so (when
+# 'make rocky' / 'make ubuntu'.  Both hsc and libs3_rdma_cuobj_client.so (when
 # present) are included in the package.
 
 packages: rpm deb
@@ -155,9 +155,9 @@ help:
 	@echo ""
 	@echo "Output:"
 	@echo "  dist/ubuntu-24.04/hsc"
-	@echo "  dist/ubuntu-24.04/libs3_rdma_cuobj.so  (when FEATURES=cuobj)"
+	@echo "  dist/ubuntu-24.04/libs3_rdma_cuobj_client.so  (when FEATURES=cuobj)"
 	@echo "  dist/ubuntu-24.04/hsc_<version>_amd64.deb"
 	@echo "  dist/rocky-8/hsc"
-	@echo "  dist/rocky-8/libs3_rdma_cuobj.so        (when FEATURES=cuobj)"
+	@echo "  dist/rocky-8/libs3_rdma_cuobj_client.so        (when FEATURES=cuobj)"
 	@echo "  dist/rocky-8/hsc-<version>-1.el8.x86_64.rpm"
 	@echo ""
