@@ -471,11 +471,18 @@ CB_BYTES=($((C-1)) $C $((C+1))
 
 mkdir -p "$TEST_DIR/chunk_boundary" "$TEST_DIR/chunk_downloads"
 
-# Create all chunk-boundary files instantly with truncate (sparse, zero-filled)
+# Create chunk-boundary files with random content.
+# Zero-filled files (truncate) would produce false-positive range tests: a server
+# bug that returns bytes from the wrong offset still compares equal to all zeros.
+# Random content ensures any off-by-one or wrong-chunk-slice is detected.
 for i in "${!CB_LABELS[@]}"; do
-    truncate -s "${CB_BYTES[$i]}" "$TEST_DIR/chunk_boundary/cb_${CB_LABELS[$i]}.dat"
+    out="$TEST_DIR/chunk_boundary/cb_${CB_LABELS[$i]}.dat"
+    sz="${CB_BYTES[$i]}"
+    dd if=/dev/urandom of="$out" bs=65536 count=$(( (sz + 65535) / 65536 )) 2>/dev/null
+    # Trim to exact size (dd rounds up to a full block)
+    truncate -s "$sz" "$out"
 done
-info "Chunk-boundary test files created (${#CB_LABELS[@]} files)"
+info "Chunk-boundary test files created (${#CB_LABELS[@]} files, random content)"
 
 # Step 5a: putObject — upload all chunk-boundary files at once via sync
 echo ""
@@ -603,7 +610,8 @@ for part_size in "${MPC_SIZES[@]}"; do
     combined="$TEST_DIR/multipart_chunk/mpc_${part_size}x3.dat"
     key="mpc_${part_size}x3.dat"
 
-    info "Creating ${part_size}×3 file (${total} bytes)..."
+    info "Creating ${part_size}×3 file (${total} bytes, random content)..."
+    dd if=/dev/urandom of="$combined" bs=65536 count=$(( (total + 65535) / 65536 )) 2>/dev/null
     truncate -s "$total" "$combined"
 
     info "uploadPart $key (${total} bytes)..."
