@@ -355,7 +355,7 @@ pub async fn upload_file(
                     // Each token encodes its own size; no separate sizes header needed.
                     let mut tok_strs = Vec::new();
                     let mut off = 0usize;
-                    let mut ok  = true;
+                    let mut ok = true;
                     while off < size {
                         let n = max_transfer.min(size - off);
                         // SAFETY: off < size and buffer has `size` bytes allocated.
@@ -376,7 +376,11 @@ pub async fn upload_file(
                             }
                         }
                     }
-                    if ok { Some(tok_strs.join("|").into_bytes()) } else { None }
+                    if ok {
+                        Some(tok_strs.join("|").into_bytes())
+                    } else {
+                        None
+                    }
                 }
             } else {
                 None
@@ -858,7 +862,7 @@ pub async fn download_file(
                 // Each token encodes its own size; no separate sizes header needed.
                 let mut tok_strs = Vec::new();
                 let mut off = 0usize;
-                let mut ok  = true;
+                let mut ok = true;
                 while off < size {
                     let n = max_transfer.min(size - off);
                     // SAFETY: off < size and buffer has `size` bytes allocated.
@@ -868,10 +872,17 @@ pub async fn download_file(
                             tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
                             off += n;
                         }
-                        Err(_) => { ok = false; break; }
+                        Err(_) => {
+                            ok = false;
+                            break;
+                        }
                     }
                 }
-                if ok { Some(tok_strs.join("|").into_bytes()) } else { None }
+                if ok {
+                    Some(tok_strs.join("|").into_bytes())
+                } else {
+                    None
+                }
             }
         } else {
             None
