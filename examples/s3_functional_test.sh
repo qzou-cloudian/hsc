@@ -455,11 +455,19 @@ C2=$((CHUNK_SIZE * 2))
 C3=$((CHUNK_SIZE * 3))
 info "Step 5: Chunk boundary putObject/getObject (CHUNK_SIZE=${CHUNK_SIZE} bytes)..."
 
-# Test object sizes: ±1 byte around each of the 1-, 2-, and 3-chunk boundaries
+# Test object sizes: ±1 byte around each of the 1-, 2-, and 3-chunk boundaries,
+# plus the midpoint between each pair (e.g. 6MB when C=4MB) to catch server bugs
+# with range requests that cross an internal chunk boundary mid-object.
 CB_LABELS=("chunk1_minus1" "chunk1_exact" "chunk1_plus1"
+           "chunk1_half"
            "chunk2_minus1" "chunk2_exact" "chunk2_plus1"
+           "chunk2_half"
            "chunk3_exact")
-CB_BYTES=($((C-1)) $C $((C+1)) $((C2-1)) $C2 $((C2+1)) $C3)
+CB_BYTES=($((C-1)) $C $((C+1))
+          $((C + C/2))
+          $((C2-1)) $C2 $((C2+1))
+          $((C2 + C/2))
+          $C3)
 
 mkdir -p "$TEST_DIR/chunk_boundary" "$TEST_DIR/chunk_downloads"
 
@@ -534,6 +542,16 @@ _cmp_range chunk1_plus1 "bytes=$((C))-$((C))"         # only byte in chunk2
 _cmp_range chunk1_plus1 "bytes=$((C-1))-$((C))"       # 1 byte each side of boundary
 _cmp_range chunk1_plus1 "bytes=$((C-4))-$((C))"       # 5 bytes crossing boundary
 
+# chunk1_half (size=C+C/2): object spans boundary with substantial data in both chunks
+# This is the key case missed by ±1 tests: a range that crosses the chunk boundary
+# but ends well before the end of the object (the server must slice from chunk 2 mid-stream).
+info "  [chunk1_half size=$((C+C/2))] — chunk1 boundary, data on both sides"
+_cmp_range chunk1_half "bytes=1024-2048"                          # entirely within chunk 1
+_cmp_range chunk1_half "bytes=$((C-1024))-$((C+1023))"           # 2KB crossing chunk boundary
+_cmp_range chunk1_half "bytes=$((C+1024))-$((C+2047))"           # entirely within chunk 2
+_cmp_range chunk1_half "bytes=$((C-4))-$((C+3))"                 # 8 bytes crossing boundary
+_cmp_range chunk1_half "bytes=$((C+C/2-4))-$((C+C/2-1))"        # last 4 bytes of object
+
 # chunk2_minus1 (size=2C-1): ends 1 byte before the 2nd chunk boundary
 info "  [chunk2_minus1 size=$((C2-1))]"
 _cmp_range chunk2_minus1 "bytes=$((C-4))-$((C+3))"    # cross chunk1→2 boundary
@@ -552,6 +570,13 @@ _cmp_range chunk2_plus1 "bytes=$((C-4))-$((C+3))"     # cross chunk1→2
 _cmp_range chunk2_plus1 "bytes=$((C2-1))-$((C2))"     # 1 byte each side of chunk2
 _cmp_range chunk2_plus1 "bytes=$((C2-4))-$((C2))"     # 5 bytes crossing chunk2→3
 _cmp_range chunk2_plus1 "bytes=$((C2))-$((C2))"        # only byte in chunk3
+
+# chunk2_half (size=2C+C/2): spans both boundaries with data well inside every chunk
+info "  [chunk2_half size=$((C2+C/2))] — both boundaries, data on all sides"
+_cmp_range chunk2_half "bytes=$((C-1024))-$((C+1023))"           # 2KB crossing chunk1 boundary
+_cmp_range chunk2_half "bytes=$((C2-1024))-$((C2+1023))"         # 2KB crossing chunk2 boundary
+_cmp_range chunk2_half "bytes=$((C2+1024))-$((C2+2047))"         # entirely within chunk 3
+_cmp_range chunk2_half "bytes=$((C2+C/2-4))-$((C2+C/2-1))"      # last 4 bytes of object
 
 # chunk3_exact (size=3C): three full chunks — every boundary exercised
 info "  [chunk3_exact size=${C3}] — all boundaries"
