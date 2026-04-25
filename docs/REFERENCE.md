@@ -394,7 +394,44 @@ hsc cat s3://bucket/file.txt --version-id abc123   # Specific version
 hsc cat s3://bucket/data.txt | grep ERROR          # Pipe to other tools
 ```
 
-## Filter Patterns
+### test - Functional Test
+
+Run object functional tests against an S3 bucket: upload a file, then verify it with
+systematic byte-range comparisons covering multipart, chunk, and EC stripe boundaries.
+
+```bash
+hsc test object <bucket> [key] [options]
+```
+
+**Options:**
+- `-f, --file <path>` - Local file to upload and compare (mutually exclusive with `--bytes`)
+- `-b, --bytes <size>` - Generate random test data of the given size (e.g. `6m`, `10m`)
+- `--chunk-size <size>` - Server storage chunk size (default: `4m`); determines EC stripe boundaries
+- `--part-size <size>` - Multipart upload part size / threshold (default: `8m`)
+- `--keep` - Keep the S3 object after the test; by default it is deleted
+- `--json` - Emit a structured JSON report with per-test pass/fail results
+
+**Range coverage:**
+- Whole-object comparison
+- First and last bytes; last 4 bytes
+- 2-byte straddle and 8-byte crossing at every:
+  - Multipart part boundary (`k × part_size`)
+  - Chunk boundary (`k × chunk_size`)
+  - EC 4+2 stripe boundary within each chunk (`k×C + C/4`, `k×C + 3C/4`)
+  - EC 2+1 stripe boundary within each chunk (`k×C + C/2`)
+
+**Exit codes:** `0` = all tests passed; `1` = one or more comparisons failed
+
+**Examples:**
+```bash
+hsc test object my-bucket -b 6m                            # 6 MiB random data, auto-generated key
+hsc test object my-bucket my-key -f /data/testfile.dat    # Use existing file
+hsc test object my-bucket -b 10m --chunk-size 2m          # 2 MiB server chunk
+hsc test object my-bucket -b 8m --part-size 4m --keep     # Custom part size, keep object
+hsc test object my-bucket -b 6m --json                    # JSON output
+```
+
+
 
 All commands that support `--include` and `--exclude` use glob patterns:
 

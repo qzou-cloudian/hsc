@@ -345,6 +345,45 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Run functional tests against an S3 bucket/object
+    Test {
+        #[command(subcommand)]
+        subcommand: TestSubcommand,
+    },
+}
+
+/// Subcommands for `hsc test`
+#[derive(Subcommand)]
+enum TestSubcommand {
+    /// Upload an object and verify it by comparing byte ranges against known boundaries.
+    ///
+    /// Generates (or uses) a local file, uploads it to S3, then runs whole-object
+    /// and targeted range comparisons covering multipart part boundaries, server
+    /// chunk boundaries, and EC stripe boundaries (C/4 and C/2 within each chunk).
+    Object {
+        /// S3 bucket name
+        bucket: String,
+        /// S3 object key (default: auto-generated)
+        key: Option<String>,
+        /// Local file to upload and compare (mutually exclusive with --bytes)
+        #[arg(short = 'f', long, value_name = "PATH")]
+        file: Option<String>,
+        /// Generate a random local file of this size (e.g. 6m, 10m)
+        #[arg(short = 'b', long, value_name = "SIZE", value_parser = parse_size)]
+        bytes: Option<u64>,
+        /// Server storage chunk size (default: 4m)
+        #[arg(long, default_value = "4m", value_name = "SIZE", value_parser = parse_size)]
+        chunk_size: u64,
+        /// Multipart upload part size / threshold (default: 8m)
+        #[arg(long, default_value = "8m", value_name = "SIZE", value_parser = parse_size)]
+        part_size: u64,
+        /// Keep the S3 object after the test (default: delete on success)
+        #[arg(long)]
+        keep: bool,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 /// Parse a human-readable size string into bytes.
@@ -700,5 +739,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             attributes,
             json,
         } => commands::parts::parts(&client, &path, attributes, json).await,
+        Commands::Test {
+            subcommand:
+                TestSubcommand::Object {
+                    bucket,
+                    key,
+                    file,
+                    bytes,
+                    chunk_size,
+                    part_size,
+                    keep,
+                    json,
+                },
+        } => {
+            commands::test_object::test_object(
+                &client,
+                &bucket,
+                key.as_deref(),
+                file.as_deref(),
+                bytes,
+                chunk_size,
+                part_size,
+                keep,
+                json,
+                #[cfg(feature = "rdma")]
+                rdma_provider,
+            )
+            .await
+        }
     }
 }

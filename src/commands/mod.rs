@@ -12,3 +12,4 @@ pub mod rb;
 pub mod rm;
 pub mod stat;
 pub mod sync;
+pub mod test_object;

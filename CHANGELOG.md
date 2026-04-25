@@ -4,6 +4,17 @@ All notable changes to hsc will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `test object` command: upload a local file (or randomly-generated data) to S3 and verify it
+  with systematic byte-range comparisons covering multipart part boundaries, server chunk
+  boundaries, and EC stripe boundaries (C/4 and C/2 within each chunk)
+  - `-f <path>`: use an existing local file; `-b <size>`: generate random test data (e.g. `6m`)
+  - `--chunk-size`: server storage chunk size (default: `4m`)
+  - `--part-size`: multipart upload part size/threshold (default: `8m`)
+  - `--keep`: retain the S3 object after the test; default is to delete on completion
+  - `--json`: emit a structured JSON summary including per-test pass/fail status
+  - Exits `1` if any comparison fails
+
 ## [0.3.2] - 2026-04-03
 
 ### Added
