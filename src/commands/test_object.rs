@@ -74,9 +74,13 @@ struct SummaryJson {
 // ── Range generation ──────────────────────────────────────────────────────────
 
 /// A boundary to probe (an offset within the object where a structural edge lies).
+///
+/// `major` is true for chunk and part boundaries (which get wider straddles);
+/// false for EC stripe boundaries (2B + 8B straddles are sufficient).
 struct Boundary {
     label: String,
     offset: u64,
+    major: bool,
 }
 
 /// Collect all structural boundaries for an object of `file_size` bytes given
@@ -87,12 +91,13 @@ fn collect_boundaries(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Bo
     let s42 = chunk_size / 4; // EC 4+2 stripe
     let s21 = chunk_size / 2; // EC 2+1 stripe
 
-    // ── Multipart part boundaries ─────────────────────────────────────────────
+    // ── Multipart part boundaries (major) ────────────────────────────────────
     let mut k = 1u64;
     while k * part_size < file_size {
         boundaries.push(Boundary {
             label: format!("part boundary {}×part_size ({})", k, k * part_size),
             offset: k * part_size,
+            major: true,
         });
         k += 1;
     }
@@ -105,15 +110,16 @@ fn collect_boundaries(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Bo
             break;
         }
 
-        // Chunk boundary (start of chunk > 0)
+        // Chunk boundary (start of chunk > 0) — major
         if chunk_idx > 0 {
             boundaries.push(Boundary {
                 label: format!("chunk boundary {}×C ({})", chunk_idx, chunk_start),
                 offset: chunk_start,
+                major: true,
             });
         }
 
-        // EC stripe offsets within this chunk
+        // EC stripe offsets within this chunk — not major
         for (stripe_offset, stripe_label) in [
             (
                 s42,
@@ -145,6 +151,7 @@ fn collect_boundaries(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Bo
                 boundaries.push(Boundary {
                     label: stripe_label,
                     offset: abs_offset,
+                    major: false,
                 });
             }
         }
@@ -187,7 +194,10 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
         );
     }
 
-    // ── Boundary-driven cases (2B straddle + 8B crossing) ────────────────────
+    // ── Boundary-driven cases ─────────────────────────────────────────────────
+    // Every boundary gets a 2-byte straddle and 8-byte crossing.
+    // Major boundaries (chunk / part) also get 1 KiB and 4 KiB straddles,
+    // because most real-world server reassembly bugs appear at those seams.
     let boundaries = collect_boundaries(file_size, chunk_size, part_size);
 
     for b in &boundaries {
@@ -202,7 +212,7 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
             Some(format!("bytes={}-{}", off - 1, off)),
         );
 
-        // 8-byte crossing: [off-4, off+3] (clamped to file bounds)
+        // 8-byte crossing: [off-4, off+3] (clamped)
         let start = off.saturating_sub(4);
         let end = (off + 3).min(file_size - 1);
         if start < end {
@@ -211,7 +221,35 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
                 Some(format!("bytes={}-{}", start, end)),
             );
         }
+
+        if b.major {
+            // 1 KiB straddle: covers the user-reported failure case (2 KiB range
+            // crossing a 4 MiB chunk boundary returned wrong bytes on a buggy server)
+            let w = 512u64;
+            let start = off.saturating_sub(w);
+            let end = (off + w - 1).min(file_size - 1);
+            if start < end {
+                add(
+                    &format!("{} — 1KiB straddle", b.label),
+                    Some(format!("bytes={}-{}", start, end)),
+                );
+            }
+
+            // 4 KiB straddle: tests larger cross-boundary reads
+            let w = 2048u64;
+            let start = off.saturating_sub(w);
+            let end = (off + w - 1).min(file_size - 1);
+            if start < end {
+                add(
+                    &format!("{} — 4KiB straddle", b.label),
+                    Some(format!("bytes={}-{}", start, end)),
+                );
+            }
+        }
     }
+
+    // ── Chunk-level structural tests ──────────────────────────────────────────
+    build_chunk_cases(file_size, chunk_size, &mut add);
 
     // ── Extra multipart tests ─────────────────────────────────────────────────
     build_multipart_cases(file_size, part_size, &mut add);
@@ -219,14 +257,89 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
     cases
 }
 
+/// Generate chunk-level test cases: complete chunk reads, adjacent 2-chunk reads,
+/// cross-EC-stripe reads within a single chunk, and large-range reads.
+fn build_chunk_cases(file_size: u64, chunk_size: u64, add: &mut impl FnMut(&str, Option<String>)) {
+    if file_size == 0 {
+        return;
+    }
+
+    let num_chunks = file_size.div_ceil(chunk_size);
+    let s42 = chunk_size / 4;
+
+    // ── Complete single-chunk reads ───────────────────────────────────────────
+    // Verifies the server can serve exactly one chunk of data end-to-end.
+    for k in 0..num_chunks {
+        let start = k * chunk_size;
+        let end = ((k + 1) * chunk_size - 1).min(file_size - 1);
+        add(
+            &format!("complete chunk {} ({}-{})", k, start, end),
+            Some(format!("bytes={}-{}", start, end)),
+        );
+    }
+
+    // ── Adjacent 2-chunk reads ────────────────────────────────────────────────
+    // Verifies that multi-chunk assembly works for every adjacent pair.
+    for k in 0..num_chunks.saturating_sub(1) {
+        let start = k * chunk_size;
+        let end = ((k + 2) * chunk_size - 1).min(file_size - 1);
+        add(
+            &format!("2-chunk span: chunks {}-{}", k, k + 1),
+            Some(format!("bytes={}-{}", start, end)),
+        );
+    }
+
+    // ── Cross-all-EC-stripes read within each chunk ───────────────────────────
+    // A single range that crosses EC4+2 stripe-1, EC2+1 stripe, and EC4+2 stripe-3,
+    // landing 4 bytes before the first stripe and 4 bytes after the last.
+    for k in 0..num_chunks {
+        let base = k * chunk_size;
+        let start = base + s42.saturating_sub(4);
+        let end = (base + 3 * s42 + 3).min(file_size - 1);
+        if start < end {
+            add(
+                &format!("cross-all-EC within chunk {} (EC4+2_1 → EC4+2_3)", k),
+                Some(format!("bytes={}-{}", start, end)),
+            );
+        }
+    }
+
+    // ── Large-range reads ─────────────────────────────────────────────────────
+    // Span a significant fraction of the file; catches bugs that only appear
+    // when reassembling many chunks/stripes in a single response.
+    if file_size >= 4 {
+        // First half
+        add(
+            "large range: first half",
+            Some(format!("bytes=0-{}", file_size / 2 - 1)),
+        );
+
+        // Second half
+        add(
+            "large range: second half",
+            Some(format!("bytes={}-{}", file_size / 2, file_size - 1)),
+        );
+
+        // First three-quarters (crosses the midpoint that the halves share)
+        if file_size >= 8 {
+            add(
+                "large range: first 3/4",
+                Some(format!("bytes=0-{}", 3 * file_size / 4 - 1)),
+            );
+        }
+    }
+}
+
 /// Generate extra test cases that are specific to multipart-uploaded objects.
 ///
 /// These probe scenarios where bugs most commonly appear in S3 server reassembly:
-/// - Reading exactly one complete part
-/// - Wider straddles across part seams (1 KiB, 4 KiB)
 /// - Reads that start or end exactly at a part seam
+/// - Reading exactly one complete part
 /// - Ranges that span two or more complete parts
 /// - The last (possibly partial) part
+///
+/// Note: 1 KiB and 4 KiB straddles across part seams are now handled generically
+/// by the major-boundary logic in `build_test_cases`.
 fn build_multipart_cases(
     file_size: u64,
     part_size: u64,
@@ -239,7 +352,7 @@ fn build_multipart_cases(
 
     let num_parts = file_size.div_ceil(part_size);
 
-    // ── Per-seam wider straddles and edge reads ───────────────────────────────
+    // ── Per-seam edge reads ───────────────────────────────────────────────────
     for k in 1..num_parts {
         let seam = k * part_size; // byte offset of the start of part k+1
         if seam >= file_size {
@@ -247,28 +360,6 @@ fn build_multipart_cases(
         }
 
         let part_label = format!("part seam {}×P ({})", k, seam);
-
-        // 1 KiB straddle: detects reassembly bugs missed by the 8-byte crossing
-        let w = 512u64;
-        let start = seam.saturating_sub(w);
-        let end = (seam + w - 1).min(file_size - 1);
-        if start < end {
-            add(
-                &format!("{} — 1KiB straddle", part_label),
-                Some(format!("bytes={}-{}", start, end)),
-            );
-        }
-
-        // 4 KiB straddle: tests S3 server chunk vs. part reassembly interaction
-        let w = 2048u64;
-        let start = seam.saturating_sub(w);
-        let end = (seam + w - 1).min(file_size - 1);
-        if start < end {
-            add(
-                &format!("{} — 4KiB straddle", part_label),
-                Some(format!("bytes={}-{}", start, end)),
-            );
-        }
 
         // Last 4 bytes of part k (read ending exactly at seam)
         if seam >= 4 {
