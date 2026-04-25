@@ -11,6 +11,7 @@ All notable changes to hsc will be documented in this file.
   - `-f <path>`: use an existing local file; `-b <size>`: generate random test data (e.g. `6m`)
   - `--chunk-size`: server storage chunk size (default: `4m`)
   - `--part-size`: multipart upload part size/threshold (default: `8m`)
+  - `--policy ec|replica`: skip EC stripe boundary tests for replicated buckets (default: `ec`)
   - `--keep`: retain the S3 object after the test; default is to delete on completion
   - `--json`: emit a structured JSON summary including per-test pass/fail status
   - Exits `1` if any comparison fails

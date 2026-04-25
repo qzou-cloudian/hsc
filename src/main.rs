@@ -377,6 +377,9 @@ enum TestSubcommand {
         /// Multipart upload part size / threshold (default: 8m)
         #[arg(long, default_value = "8m", value_name = "SIZE", value_parser = parse_size)]
         part_size: u64,
+        /// Storage policy of the bucket (controls which EC stripe tests are run)
+        #[arg(long, default_value = "ec")]
+        policy: commands::test_object::StoragePolicy,
         /// Keep the S3 object after the test (default: delete on success)
         #[arg(long)]
         keep: bool,
@@ -748,6 +751,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     bytes,
                     chunk_size,
                     part_size,
+                    policy,
                     keep,
                     json,
                 },
@@ -760,6 +764,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 bytes,
                 chunk_size,
                 part_size,
+                &policy,
                 keep,
                 json,
                 #[cfg(feature = "rdma")]

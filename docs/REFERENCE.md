@@ -408,10 +408,11 @@ hsc test object <bucket> [key] [options]
 - `-b, --bytes <size>` - Generate random test data of the given size (e.g. `6m`, `10m`)
 - `--chunk-size <size>` - Server storage chunk size (default: `4m`); determines EC stripe boundaries
 - `--part-size <size>` - Multipart upload part size / threshold (default: `8m`)
+- `--policy <ec|replica>` - Storage policy of the bucket (default: `ec`); set to `replica` to skip EC stripe boundary tests for replicated buckets
 - `--keep` - Keep the S3 object after the test; by default it is deleted
 - `--json` - Emit a structured JSON report with per-test pass/fail results
 
-**Range coverage:**
+**Range coverage (EC policy):**
 - Whole-object comparison
 - First and last bytes; last 4 bytes
 - 2-byte straddle and 8-byte crossing at every:
@@ -419,16 +420,24 @@ hsc test object <bucket> [key] [options]
   - Chunk boundary (`k × chunk_size`)
   - EC 4+2 stripe boundary within each chunk (`k×C + C/4`, `k×C + 3C/4`)
   - EC 2+1 stripe boundary within each chunk (`k×C + C/2`)
+- 1 KiB and 4 KiB straddles at chunk and part boundaries (major seams)
+- Complete single-chunk reads and adjacent 2-chunk spans
+- Cross-all-EC-stripes read within each chunk
+- Large ranges: first half, second half, first three-quarters
+
+**Range coverage (replica policy):**
+- Same as EC, minus the EC 4+2 / EC 2+1 stripe tests and cross-EC reads
 
 **Exit codes:** `0` = all tests passed; `1` = one or more comparisons failed
 
 **Examples:**
 ```bash
-hsc test object my-bucket -b 6m                            # 6 MiB random data, auto-generated key
-hsc test object my-bucket my-key -f /data/testfile.dat    # Use existing file
-hsc test object my-bucket -b 10m --chunk-size 2m          # 2 MiB server chunk
-hsc test object my-bucket -b 8m --part-size 4m --keep     # Custom part size, keep object
-hsc test object my-bucket -b 6m --json                    # JSON output
+hsc test object my-bucket -b 6m                              # 6 MiB random data, auto-generated key
+hsc test object my-bucket my-key -f /data/testfile.dat      # Use existing file
+hsc test object my-bucket -b 10m --chunk-size 2m            # 2 MiB server chunk
+hsc test object my-bucket -b 8m --part-size 4m --keep       # Custom part size, keep object
+hsc test object my-bucket -b 6m --policy replica            # Replicated bucket (skip EC tests)
+hsc test object my-bucket -b 6m --json                      # JSON output
 ```
 
 

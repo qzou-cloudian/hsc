@@ -13,6 +13,24 @@ use crate::rdma::RdmaProvider;
 #[cfg(feature = "rdma")]
 use std::sync::Arc;
 
+// ── Storage policy ────────────────────────────────────────────────────────────
+
+/// Storage policy used by the target bucket.
+///
+/// Controls which structural boundaries are probed:
+/// * `Ec` — erasure-coded storage; tests EC 4+2 and EC 2+1 stripe offsets within
+///   each chunk in addition to chunk and part boundaries.
+/// * `Replica` — replicated storage; tests only chunk and multipart part boundaries.
+///   EC stripe tests are omitted because replicated objects have no intra-chunk
+///   stripe structure.
+#[derive(Clone, Debug, PartialEq, clap::ValueEnum)]
+pub enum StoragePolicy {
+    /// Erasure-coded storage — tests chunk, part, and EC stripe boundaries (default)
+    Ec,
+    /// Replicated storage — tests chunk and part boundaries only
+    Replica,
+}
+
 // ── XorShift64 PRNG — no external dependency needed ──────────────────────────
 
 fn xorshift64(state: &mut u64) -> u64 {
@@ -66,6 +84,7 @@ struct SummaryJson {
     file_size: u64,
     chunk_size: u64,
     part_size: u64,
+    policy: String,
     passed: usize,
     failed: usize,
     tests: Vec<TestResultJson>,
@@ -85,7 +104,15 @@ struct Boundary {
 
 /// Collect all structural boundaries for an object of `file_size` bytes given
 /// `chunk_size` (server storage chunk) and `part_size` (multipart upload part).
-fn collect_boundaries(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Boundary> {
+///
+/// When `policy` is `Replica`, EC stripe boundaries are omitted because replicated
+/// objects have no intra-chunk stripe structure.
+fn collect_boundaries(
+    file_size: u64,
+    chunk_size: u64,
+    part_size: u64,
+    policy: &StoragePolicy,
+) -> Vec<Boundary> {
     let mut boundaries: Vec<Boundary> = Vec::new();
 
     let s42 = chunk_size / 4; // EC 4+2 stripe
@@ -119,40 +146,42 @@ fn collect_boundaries(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Bo
             });
         }
 
-        // EC stripe offsets within this chunk — not major
-        for (stripe_offset, stripe_label) in [
-            (
-                s42,
-                format!(
-                    "EC4+2 stripe-1 in chunk {} ({})",
-                    chunk_idx,
-                    chunk_start + s42
+        // EC stripe offsets within this chunk — not major; skipped for replica policy
+        if *policy == StoragePolicy::Ec {
+            for (stripe_offset, stripe_label) in [
+                (
+                    s42,
+                    format!(
+                        "EC4+2 stripe-1 in chunk {} ({})",
+                        chunk_idx,
+                        chunk_start + s42
+                    ),
                 ),
-            ),
-            (
-                s21,
-                format!(
-                    "EC2+1  stripe   in chunk {} ({})",
-                    chunk_idx,
-                    chunk_start + s21
+                (
+                    s21,
+                    format!(
+                        "EC2+1  stripe   in chunk {} ({})",
+                        chunk_idx,
+                        chunk_start + s21
+                    ),
                 ),
-            ),
-            (
-                3 * s42,
-                format!(
-                    "EC4+2 stripe-3 in chunk {} ({})",
-                    chunk_idx,
-                    chunk_start + 3 * s42
+                (
+                    3 * s42,
+                    format!(
+                        "EC4+2 stripe-3 in chunk {} ({})",
+                        chunk_idx,
+                        chunk_start + 3 * s42
+                    ),
                 ),
-            ),
-        ] {
-            let abs_offset = chunk_start + stripe_offset;
-            if abs_offset < file_size {
-                boundaries.push(Boundary {
-                    label: stripe_label,
-                    offset: abs_offset,
-                    major: false,
-                });
+            ] {
+                let abs_offset = chunk_start + stripe_offset;
+                if abs_offset < file_size {
+                    boundaries.push(Boundary {
+                        label: stripe_label,
+                        offset: abs_offset,
+                        major: false,
+                    });
+                }
             }
         }
 
@@ -163,7 +192,12 @@ fn collect_boundaries(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Bo
 }
 
 /// Build all test cases for an object of `file_size` bytes.
-fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<TestCase> {
+fn build_test_cases(
+    file_size: u64,
+    chunk_size: u64,
+    part_size: u64,
+    policy: &StoragePolicy,
+) -> Vec<TestCase> {
     let mut cases: Vec<TestCase> = Vec::new();
     let mut seen_ranges: std::collections::HashSet<String> = std::collections::HashSet::new();
 
@@ -198,7 +232,7 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
     // Every boundary gets a 2-byte straddle and 8-byte crossing.
     // Major boundaries (chunk / part) also get 1 KiB and 4 KiB straddles,
     // because most real-world server reassembly bugs appear at those seams.
-    let boundaries = collect_boundaries(file_size, chunk_size, part_size);
+    let boundaries = collect_boundaries(file_size, chunk_size, part_size, policy);
 
     for b in &boundaries {
         let off = b.offset;
@@ -249,7 +283,7 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
     }
 
     // ── Chunk-level structural tests ──────────────────────────────────────────
-    build_chunk_cases(file_size, chunk_size, &mut add);
+    build_chunk_cases(file_size, chunk_size, policy, &mut add);
 
     // ── Extra multipart tests ─────────────────────────────────────────────────
     build_multipart_cases(file_size, part_size, &mut add);
@@ -259,7 +293,14 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
 
 /// Generate chunk-level test cases: complete chunk reads, adjacent 2-chunk reads,
 /// cross-EC-stripe reads within a single chunk, and large-range reads.
-fn build_chunk_cases(file_size: u64, chunk_size: u64, add: &mut impl FnMut(&str, Option<String>)) {
+///
+/// Cross-EC reads are skipped when `policy` is `Replica`.
+fn build_chunk_cases(
+    file_size: u64,
+    chunk_size: u64,
+    policy: &StoragePolicy,
+    add: &mut impl FnMut(&str, Option<String>),
+) {
     if file_size == 0 {
         return;
     }
@@ -292,15 +333,18 @@ fn build_chunk_cases(file_size: u64, chunk_size: u64, add: &mut impl FnMut(&str,
     // ── Cross-all-EC-stripes read within each chunk ───────────────────────────
     // A single range that crosses EC4+2 stripe-1, EC2+1 stripe, and EC4+2 stripe-3,
     // landing 4 bytes before the first stripe and 4 bytes after the last.
-    for k in 0..num_chunks {
-        let base = k * chunk_size;
-        let start = base + s42.saturating_sub(4);
-        let end = (base + 3 * s42 + 3).min(file_size - 1);
-        if start < end {
-            add(
-                &format!("cross-all-EC within chunk {} (EC4+2_1 → EC4+2_3)", k),
-                Some(format!("bytes={}-{}", start, end)),
-            );
+    // Skipped for replica storage (no intra-chunk stripe structure).
+    if *policy == StoragePolicy::Ec {
+        for k in 0..num_chunks {
+            let base = k * chunk_size;
+            let start = base + s42.saturating_sub(4);
+            let end = (base + 3 * s42 + 3).min(file_size - 1);
+            if start < end {
+                add(
+                    &format!("cross-all-EC within chunk {} (EC4+2_1 → EC4+2_3)", k),
+                    Some(format!("bytes={}-{}", start, end)),
+                );
+            }
         }
     }
 
@@ -451,6 +495,7 @@ pub async fn test_object(
     bytes: Option<u64>,
     chunk_size: u64,
     part_size: u64,
+    policy: &StoragePolicy,
     keep: bool,
     json: bool,
     #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
@@ -501,7 +546,10 @@ pub async fn test_object(
         };
         println!("Testing object: {} ({} bytes)", s3_uri, file_size);
         println!("  Local file: {}{}", local_path, source_label);
-        println!("  Chunk size: {}  Part size: {}", chunk_size, part_size);
+        println!(
+            "  Chunk size: {}  Part size: {}  Policy: {:?}",
+            chunk_size, part_size, policy
+        );
     }
 
     // ── 3. Upload ─────────────────────────────────────────────────────────────
@@ -548,7 +596,7 @@ pub async fn test_object(
     }
 
     // ── 4. Build test cases ───────────────────────────────────────────────────
-    let cases = build_test_cases(file_size, chunk_size, part_size);
+    let cases = build_test_cases(file_size, chunk_size, part_size, policy);
 
     // ── 5. Run tests ──────────────────────────────────────────────────────────
     let mut results: Vec<TestResultJson> = Vec::new();
@@ -644,6 +692,7 @@ pub async fn test_object(
             file_size,
             chunk_size,
             part_size,
+            policy: format!("{:?}", policy).to_ascii_lowercase(),
             passed,
             failed,
             tests: results,
