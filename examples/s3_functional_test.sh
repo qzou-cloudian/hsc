@@ -324,11 +324,24 @@ info "Step 4: Object functional tests (hsc test object)..."
 info "  Policy: $POLICY  Chunk: $CHUNK_SIZE_STR"
 echo ""
 
-# _run_test_object <description> [extra args passed to 'hsc test object']
-# Streams output to the terminal in real time and accumulates per-test
-# pass/fail counts into SUCCESS_COUNT / ERROR_COUNT.
+# _run_test_object <description> <size> [extra args passed to 'hsc test object']
+# Generates a random file of <size> bytes in TEST_DIR, then runs 'hsc test object'
+# with -f pointing to that file.  Output is streamed to the terminal in real time
+# and per-test pass/fail counts are merged into SUCCESS_COUNT / ERROR_COUNT.
 _run_test_object() {
-    local desc="$1"; shift
+    local desc="$1" size_str="$2"; shift 2
+    # Convert size string to bytes for dd / truncate
+    local size_bytes
+    case "$size_str" in
+        *m) size_bytes=$(( ${size_str%m} * 1048576 )) ;;
+        *k) size_bytes=$(( ${size_str%k} * 1024 ))    ;;
+        *b) size_bytes="${size_str%b}"                  ;;
+        *)  size_bytes="$size_str"                      ;;
+    esac
+    local test_file="$TEST_DIR/hsc_test_${size_str}.dat"
+    dd if=/dev/urandom of="$test_file" bs=65536 count=$(( (size_bytes + 65535) / 65536 )) 2>/dev/null
+    truncate -s "$size_bytes" "$test_file"
+
     info "  $desc..."
     local _log rc
     _log=$(mktemp)
@@ -336,6 +349,7 @@ _run_test_object() {
     $BINARY test object "$BUCKET_NAME" \
         --chunk-size "$CHUNK_SIZE_STR" \
         --policy "$POLICY" \
+        -f "$test_file" \
         "$@" 2>&1 | tee "$_log"
     rc=${PIPESTATUS[0]}
     local passed=0 failed=0 result_line
@@ -350,40 +364,40 @@ _run_test_object() {
         if [ "${failed:-0}" -gt 0 ]; then
             ERROR_COUNT=$((ERROR_COUNT + failed))
             FAILED_TESTS+=("test object [$desc]: $failed case(s) failed")
-            FAILED_CMDS+=("$BINARY test object $BUCKET_NAME --chunk-size $CHUNK_SIZE_STR --policy $POLICY $*")
+            FAILED_CMDS+=("$BINARY test object $BUCKET_NAME --chunk-size $CHUNK_SIZE_STR --policy $POLICY -f $test_file $*")
         fi
     else
         ((ERROR_COUNT++))
         FAILED_TESTS+=("test object [$desc]: command failed (no result produced)")
-        FAILED_CMDS+=("$BINARY test object $BUCKET_NAME --chunk-size $CHUNK_SIZE_STR --policy $POLICY $*")
+        FAILED_CMDS+=("$BINARY test object $BUCKET_NAME --chunk-size $CHUNK_SIZE_STR --policy $POLICY -f $test_file $*")
     fi
 }
 
 # 1 MiB: fits in one storage chunk; uploaded as a single part.
 # Covers within-chunk range reads and basic single-part object integrity.
-_run_test_object "1 MiB single-chunk" \
-    -b 1m --part-size 8m
+_run_test_object "1 MiB single-chunk" 1m \
+    --part-size 8m
 
 echo ""
 # 24 MiB: 3 parts × 8 MiB, 6 storage chunks × 4 MiB.
 # Covers all EC stripe (C/4, C/2, 3C/4), chunk, and multipart-part boundaries.
-_run_test_object "24 MiB (3×8 MiB parts, 6×4 MiB chunks — all boundary types)" \
-    -b 24m --part-size 8m
+_run_test_object "24 MiB (3×8 MiB parts, 6×4 MiB chunks — all boundary types)" 24m \
+    --part-size 8m
 
 echo ""
 # Multipart objects with part sizes intentionally misaligned to the storage chunk
 # size.  This forces part boundaries to land mid-chunk, exposing server bugs in
 # cross-chunk reassembly when parts don't start on chunk edges.
-_run_test_object "15 MiB (3×5 MiB parts, misaligned to chunk)" \
-    -b 15m --part-size 5m
+_run_test_object "15 MiB (3×5 MiB parts, misaligned to chunk)" 15m \
+    --part-size 5m
 
 echo ""
-_run_test_object "18 MiB (3×6 MiB parts, misaligned to chunk)" \
-    -b 18m --part-size 6m
+_run_test_object "18 MiB (3×6 MiB parts, misaligned to chunk)" 18m \
+    --part-size 6m
 
 echo ""
-_run_test_object "21 MiB (3×7 MiB parts, misaligned to chunk)" \
-    -b 21m --part-size 7m
+_run_test_object "21 MiB (3×7 MiB parts, misaligned to chunk)" 21m \
+    --part-size 7m
 
 # Step 5: copyObject — server-side copy at sub-chunk, multipart, and large sizes
 step_time
