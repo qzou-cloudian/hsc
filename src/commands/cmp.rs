@@ -220,7 +220,7 @@ pub async fn compare_paths(
                     path2: path2.to_string(),
                     range_start: start,
                     range_size: limit,
-                    bytes_compared,
+                    bytes_compared: bytes_compared + i as u64,
                     size1: (limit.is_none()).then_some(size1),
                     size2: (limit.is_none()).then_some(size2),
                     difference: Some(CompareDifference {

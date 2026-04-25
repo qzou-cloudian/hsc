@@ -4,6 +4,47 @@ All notable changes to hsc will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-04-03
+
+### Added
+- `exists` command: test whether a local path, S3 bucket, or S3 object exists
+  - Exits `0` when the target exists, `1` when it does not
+  - `--json` emits `{"path": "...", "exists": true/false}`
+- `hash` command: compute a digest for a local file or S3 object by streaming its content
+  - Supports `MD5`, `CRC32`, `CRC32C`, `SHA1`, `SHA256` via `--algorithm` (default: `SHA256`)
+  - `--json` emits `{"path", "algorithm", "value", "size"}`
+- `parts` command: show multipart upload metadata for an S3 object
+  - Default path uses `HeadObject` (works on any S3-compatible server); reports part number and size
+  - `--attributes` switches to `GetObjectAttributes` (AWS-native; adds per-part checksums)
+  - `--json` emits structured JSON
+
+### Changed
+- `cmp` command: merged the former `verify` command; `cmp` now covers all comparison scenarios
+  - `--algorithm` selects the hash algorithm printed on a successful match (default: `SHA256`)
+  - `--json` emits a structured result object
+  - Full-file hash is skipped when `--range`/`--offset`/`--size` is set (partial comparison)
+
+### Fixed
+- **`cmp` `bytes_compared` off-by-one**: when a byte mismatch was found at position `i` in the
+  current read chunk, the reported `bytes_compared` field omitted the `i` bytes successfully
+  compared within that chunk; now correctly reports `prior_bytes + i`
+- **RDMA deprecation**: replaced deprecated `process_reply_token` with `process_rdma_reply`;
+  parses the `x-amz-rdma-reply` header as a numeric HTTP status code and reads `x-amz-rdma-bytes`
+  for the transferred byte count
+- **`examples/s3_functional_test.sh` exit code**: script previously exited `0` regardless of
+  failures; now exits `1` when any test fails
+- **Chunk-midpoint range coverage**: added `chunk1_half` (C + C/2) and `chunk2_half` (2C + C/2)
+  objects to chunk-boundary tests, covering byte ranges that cross a chunk boundary mid-object
+  (previously only `±1` boundary objects were tested)
+- **Random test file content**: chunk-boundary and multipart test files are now filled with
+  random data via `/dev/urandom` instead of `truncate` sparse zeros; sparse files cannot detect
+  bugs where a server returns bytes from the wrong offset within a zero-filled chunk
+
+### Build
+- Updated cuobj RDMA provider path from `providers/cuobj` to `providers/cuobj-client` following
+  upstream rename; updated `.so` name to `libs3_rdma_cuobj_client.so` in Makefile and package
+  build scripts
+
 ## [0.3.1] - 2026-03-31
 
 ### Added

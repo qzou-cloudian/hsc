@@ -307,6 +307,9 @@ Test whether a local path, S3 bucket, or S3 object exists.
 hsc exists <path> [--json]
 ```
 
+**Options:**
+- `--json` - Emit structured JSON output (`{"path": "...", "exists": true}`)
+
 **Behavior:**
 - Prints `true`/`false` in text mode
 - Exits `0` when the target exists, `1` when it does not
@@ -448,6 +451,7 @@ Configuration is resolved in this order:
 ## Exit Codes
 
 - `0` - Success
+- `1` - Content differs (`cmp`), or target does not exist (`exists`)
 - `Non-zero` - Error occurred (error message printed to stderr)
 
 ## See Also

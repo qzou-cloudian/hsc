@@ -156,7 +156,7 @@ async fn parts_via_head_object(
         .await?;
     let total_parts = part1.parts_count();
 
-    if total_parts.is_none() {
+    let Some(total) = total_parts else {
         // Single-put object — no multipart metadata available.
         return Ok(PartsOutput {
             path: path.to_string(),
@@ -169,9 +169,8 @@ async fn parts_via_head_object(
             is_truncated: false,
             parts: vec![],
         });
-    }
+    };
 
-    let total = total_parts.unwrap();
     let mut all_parts: Vec<PartEntry> = Vec::with_capacity(total as usize);
 
     // Reuse the part-1 response already in hand, then fetch the rest sequentially.

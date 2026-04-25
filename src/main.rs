@@ -287,8 +287,7 @@ enum Commands {
         #[arg(long)]
         version_id: Option<String>,
     },
-    /// Compare two files or objects byte-by-byte
-    /// Compare two files or objects and report a structured result with a content hash on match
+    /// Compare two files or objects byte-by-byte; prints a content hash on match
     Cmp {
         /// First path (local path or s3://bucket/key)
         path1: String,
