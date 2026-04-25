@@ -24,7 +24,7 @@ jobs:
       - name: Create stubs for private path dependencies
         run: |
           mkdir -p ../s3-rdma/core/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj = []\n' \
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
               > ../s3-rdma/core/Cargo.toml
           touch ../s3-rdma/core/src/lib.rs
       - name: Run tests
@@ -41,7 +41,7 @@ jobs:
       - name: Create stubs for private path dependencies
         run: |
           mkdir -p ../s3-rdma/core/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj = []\n' \
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
               > ../s3-rdma/core/Cargo.toml
           touch ../s3-rdma/core/src/lib.rs
       - name: Run clippy
@@ -70,7 +70,7 @@ jobs:
       - name: Create stubs for private path dependencies
         run: |
           mkdir -p ../s3-rdma/core/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj = []\n' \
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
               > ../s3-rdma/core/Cargo.toml
           touch ../s3-rdma/core/src/lib.rs
       - name: Build

@@ -1,0 +1,146 @@
+name: Release
+
+# Triggered by version tags (e.g. v0.3.2).
+# Builds native binaries for Linux and macOS, packages RPM and DEB,
+# then publishes a GitHub Release with all artifacts attached.
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Build native binaries ──────────────────────────────────────────────────
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static musl binary — runs on any Linux x86_64 regardless of glibc version.
+          - runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact: hsc-linux-x86_64
+            musl: true
+          # macOS Apple Silicon (arm64)
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            artifact: hsc-darwin-aarch64
+            musl: false
+          # macOS Intel (x86_64)
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            artifact: hsc-darwin-x86_64
+            musl: false
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # s3-rdma and cuobj are private path-dependencies only needed for the
+      # RDMA feature, which is not built in CI. Stub crates satisfy Cargo's
+      # dependency resolution without requiring access to the private repos.
+      - name: Create stubs for private path dependencies
+        run: |
+          mkdir -p ../s3-rdma/core/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
+              > ../s3-rdma/core/Cargo.toml
+          touch ../s3-rdma/core/src/lib.rs
+
+      - name: Install musl toolchain
+        if: matrix.musl
+        run: |
+          sudo apt-get install -y musl-tools
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Stage artifact
+        run: cp target/${{ matrix.target }}/release/hsc ${{ matrix.artifact }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  # ── Package RPM and DEB ───────────────────────────────────────────────────
+  package:
+    name: Build RPM and DEB
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The musl static binary is self-contained; it works inside both
+      # Rocky 8 and Ubuntu 24.04 packages without glibc compatibility issues.
+      - name: Download Linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: hsc-linux-x86_64
+          path: pkg
+
+      - name: Prepare binary
+        run: |
+          mv pkg/hsc-linux-x86_64 pkg/hsc
+          chmod +x pkg/hsc
+
+      - name: Get version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Run build-rpm.sh inside a Rocky Linux 8 container — installs the
+      # required rpm-build tools inline so no custom image is needed.
+      - name: Build RPM
+        run: |
+          docker run --rm \
+            -v "$PWD/pkg:/pkg" \
+            -v "$PWD/docker:/scripts:ro" \
+            -e VERSION=${{ steps.version.outputs.version }} \
+            rockylinux:8 \
+            bash -c 'dnf install -y rpm-build rpmdevtools && rpmdev-setuptree && bash /scripts/build-rpm.sh'
+
+      # Run build-deb.sh inside Ubuntu 24.04; dpkg-deb is already available.
+      - name: Build DEB
+        run: |
+          docker run --rm \
+            -v "$PWD/pkg:/pkg" \
+            -v "$PWD/docker:/scripts:ro" \
+            -e VERSION=${{ steps.version.outputs.version }} \
+            ubuntu:24.04 \
+            bash /scripts/build-deb.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            pkg/*.rpm
+            pkg/*.deb
+
+  # ── Create GitHub Release ──────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build, package]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/hsc-linux-x86_64/hsc-linux-x86_64
+            artifacts/hsc-darwin-aarch64/hsc-darwin-aarch64
+            artifacts/hsc-darwin-x86_64/hsc-darwin-x86_64
+            artifacts/packages/*.rpm
+            artifacts/packages/*.deb
