@@ -187,7 +187,7 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
         );
     }
 
-    // ── Boundary-driven cases ─────────────────────────────────────────────────
+    // ── Boundary-driven cases (2B straddle + 8B crossing) ────────────────────
     let boundaries = collect_boundaries(file_size, chunk_size, part_size);
 
     for b in &boundaries {
@@ -213,7 +213,130 @@ fn build_test_cases(file_size: u64, chunk_size: u64, part_size: u64) -> Vec<Test
         }
     }
 
+    // ── Extra multipart tests ─────────────────────────────────────────────────
+    build_multipart_cases(file_size, part_size, &mut add);
+
     cases
+}
+
+/// Generate extra test cases that are specific to multipart-uploaded objects.
+///
+/// These probe scenarios where bugs most commonly appear in S3 server reassembly:
+/// - Reading exactly one complete part
+/// - Wider straddles across part seams (1 KiB, 4 KiB)
+/// - Reads that start or end exactly at a part seam
+/// - Ranges that span two or more complete parts
+/// - The last (possibly partial) part
+fn build_multipart_cases(
+    file_size: u64,
+    part_size: u64,
+    add: &mut impl FnMut(&str, Option<String>),
+) {
+    if file_size <= part_size {
+        // Single-part PUT — no multipart seams to probe
+        return;
+    }
+
+    let num_parts = file_size.div_ceil(part_size);
+
+    // ── Per-seam wider straddles and edge reads ───────────────────────────────
+    for k in 1..num_parts {
+        let seam = k * part_size; // byte offset of the start of part k+1
+        if seam >= file_size {
+            break;
+        }
+
+        let part_label = format!("part seam {}×P ({})", k, seam);
+
+        // 1 KiB straddle: detects reassembly bugs missed by the 8-byte crossing
+        let w = 512u64;
+        let start = seam.saturating_sub(w);
+        let end = (seam + w - 1).min(file_size - 1);
+        if start < end {
+            add(
+                &format!("{} — 1KiB straddle", part_label),
+                Some(format!("bytes={}-{}", start, end)),
+            );
+        }
+
+        // 4 KiB straddle: tests S3 server chunk vs. part reassembly interaction
+        let w = 2048u64;
+        let start = seam.saturating_sub(w);
+        let end = (seam + w - 1).min(file_size - 1);
+        if start < end {
+            add(
+                &format!("{} — 4KiB straddle", part_label),
+                Some(format!("bytes={}-{}", start, end)),
+            );
+        }
+
+        // Last 4 bytes of part k (read ending exactly at seam)
+        if seam >= 4 {
+            add(
+                &format!("{} — last 4B of part {}", part_label, k),
+                Some(format!("bytes={}-{}", seam - 4, seam - 1)),
+            );
+        }
+
+        // First 4 bytes of part k+1 (read starting exactly at seam)
+        if seam + 3 < file_size {
+            add(
+                &format!("{} — first 4B of part {}", part_label, k + 1),
+                Some(format!("bytes={}-{}", seam, seam + 3)),
+            );
+        }
+    }
+
+    // ── Complete single-part reads ────────────────────────────────────────────
+    // First complete part
+    add(
+        "complete part 1",
+        Some(format!("bytes=0-{}", part_size - 1)),
+    );
+
+    // Second complete part (if it exists)
+    if file_size > 2 * part_size {
+        add(
+            "complete part 2",
+            Some(format!("bytes={}-{}", part_size, 2 * part_size - 1)),
+        );
+    }
+
+    // Last part (always partial unless file_size is an exact multiple of part_size)
+    let last_part_start = (num_parts - 1) * part_size;
+    if last_part_start > 0 && last_part_start < file_size {
+        add(
+            &format!("last (partial) part {}", num_parts),
+            Some(format!("bytes={}-{}", last_part_start, file_size - 1)),
+        );
+    }
+
+    // ── Multi-part spanning reads ─────────────────────────────────────────────
+    // First 2 complete parts
+    if file_size >= 2 * part_size {
+        add(
+            "first 2 complete parts",
+            Some(format!("bytes=0-{}", 2 * part_size - 1)),
+        );
+    }
+
+    // Last 2 parts (the last complete part + the tail, or the last 2 complete parts)
+    if num_parts >= 3 {
+        let start = (num_parts - 2) * part_size;
+        add(
+            &format!("last 2 parts (parts {}-{})", num_parts - 1, num_parts),
+            Some(format!("bytes={}-{}", start, file_size - 1)),
+        );
+    }
+
+    // All parts except the last (tests reading up to but not including the final seam)
+    if num_parts >= 3 {
+        let end = (num_parts - 1) * part_size - 1;
+        add(
+            &format!("all parts except last ({} parts)", num_parts - 1),
+            Some(format!("bytes=0-{}", end)),
+        );
+    }
 }
 
 // ── Temp file helper ──────────────────────────────────────────────────────────
