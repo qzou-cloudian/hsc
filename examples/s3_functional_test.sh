@@ -129,7 +129,7 @@ FAILED_CMDS=()    # parallel array: rerun command for each failure
 
 # Object sizes for base upload/download/metadata tests (Steps 2–3).
 # Range, chunk-boundary, and EC stripe integrity is handled by 'hsc test object' in Step 4.
-SIZES=("1b" "10b" "1k" "64k" "1m" "8m" "64m")
+SIZES=("1b" "2b" "10b" "1k" "64k" "1m" "8m" "64m")
 
 echo "========================================="
 echo "S3 Functional Test"
@@ -206,10 +206,12 @@ info "Step 2: Creating and uploading base test files..."
 for size in "${SIZES[@]}"; do
     filename="$TEST_DIR/testfile_${size}.dat"
     case $size in
-        *b) truncate -s ${size%b}                     "$filename" ;;
-        *k) truncate -s $((${size%k} * 1024))         "$filename" ;;
-        *m) truncate -s $((${size%m} * 1048576))      "$filename" ;;
+        *b) bytes=${size%b} ;;
+        *k) bytes=$(( ${size%k} * 1024 )) ;;
+        *m) bytes=$(( ${size%m} * 1048576 )) ;;
     esac
+    dd if=/dev/urandom of="$filename" bs=65536 count=$(( (bytes + 65535) / 65536 )) 2>/dev/null
+    truncate -s "$bytes" "$filename"
 done
 info "All test files created"
 
@@ -450,7 +452,7 @@ info "Step 6: SSE-C key validation tests..."
 _SSEC_KEY=$(openssl rand -base64 32)
 _SSEC_WRONG=$(openssl rand -base64 32)
 _SSEC_SIZE=65536
-truncate -s $_SSEC_SIZE "$TEST_DIR/$_SSEC_OBJ" 2>/dev/null || dd if=/dev/random of="$TEST_DIR/$_SSEC_OBJ" bs=$_SSEC_SIZE count=1 iflag=fullblock status=none
+dd if=/dev/urandom of="$TEST_DIR/$_SSEC_OBJ" bs=$_SSEC_SIZE count=1 2>/dev/null
 
 # (a) upload with SSE-C key
 if $BINARY cp --sse-c AES256 --sse-c-key "$_SSEC_KEY" \
@@ -501,9 +503,9 @@ _SYNC_PREFIX="sync_test"
 mkdir -p "$_SYNC_DIR"
 
 # Create 3 small files for sync tests
-truncate -s 4096  "$_SYNC_DIR/sync_a.dat"
-truncate -s 8192  "$_SYNC_DIR/sync_b.dat"
-truncate -s 16384 "$_SYNC_DIR/sync_c.dat"
+dd if=/dev/urandom of="$_SYNC_DIR/sync_a.dat" bs=4096  count=1 2>/dev/null
+dd if=/dev/urandom of="$_SYNC_DIR/sync_b.dat" bs=8192  count=1 2>/dev/null
+dd if=/dev/urandom of="$_SYNC_DIR/sync_c.dat" bs=16384 count=1 2>/dev/null
 
 # Initial sync: upload all 3 files with --checksum
 info "  sync --checksum: uploading 3 files..."
@@ -589,8 +591,8 @@ fi
 rm -f "$TEST_DIR/diff_src/"*.dat
 $BINARY rm --recursive "s3://$BUCKET_NAME/diff_src/" >/dev/null 2>&1 || true
 # Populate diff_src with two files, upload them, then diff — expect no differences.
-truncate -s 4096 "$TEST_DIR/diff_src/diff_a.dat"
-truncate -s 8192 "$TEST_DIR/diff_src/diff_b.dat"
+dd if=/dev/urandom of="$TEST_DIR/diff_src/diff_a.dat" bs=4096 count=1 2>/dev/null
+dd if=/dev/urandom of="$TEST_DIR/diff_src/diff_b.dat" bs=8192 count=1 2>/dev/null
 $BINARY cp $SSE_UPLOAD_ARGS \
     "$TEST_DIR/diff_src/diff_a.dat" "s3://$BUCKET_NAME/diff_src/diff_a.dat" >/dev/null 2>&1
 $BINARY cp $SSE_UPLOAD_ARGS \
@@ -603,7 +605,7 @@ else
     error "diff: unexpected differences reported: $_diff_out"
 fi
 # Add an extra local file; diff should report it as only-in-source
-truncate -s 1024 "$TEST_DIR/diff_src/diff_extra.dat"
+dd if=/dev/urandom of="$TEST_DIR/diff_src/diff_extra.dat" bs=1024 count=1 2>/dev/null
 _diff_out2=$($BINARY diff "$TEST_DIR/diff_src/" "s3://$BUCKET_NAME/diff_src/" 2>/dev/null)
 if echo "$_diff_out2" | grep -q "diff_extra"; then
     success "diff: correctly detected file present locally but not in S3"
@@ -787,7 +789,7 @@ else
 fi
 
 _diff_json_dir=$(mktemp -d)
-truncate -s 1024 "$_diff_json_dir/tmp_diff_json.dat"
+dd if=/dev/urandom of="$_diff_json_dir/tmp_diff_json.dat" bs=1024 count=1 2>/dev/null
 # shellcheck disable=SC2086
 $BINARY cp $SSE_UPLOAD_ARGS "$_diff_json_dir/tmp_diff_json.dat" \
     "s3://$BUCKET_NAME/diff_json_test/tmp_diff_json.dat" >/dev/null 2>&1 || true
