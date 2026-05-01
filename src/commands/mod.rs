@@ -8,6 +8,7 @@ pub mod ls;
 pub mod mb;
 pub mod mv;
 pub mod parts;
+pub mod perf_object;
 pub mod rb;
 pub mod rm;
 pub mod stat;

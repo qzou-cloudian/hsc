@@ -350,6 +350,11 @@ enum Commands {
         #[command(subcommand)]
         subcommand: TestSubcommand,
     },
+    /// Run performance benchmarks against an S3 bucket
+    Perf {
+        #[command(subcommand)]
+        subcommand: PerfSubcommand,
+    },
 }
 
 /// Subcommands for `hsc test`
@@ -389,6 +394,96 @@ enum TestSubcommand {
     },
 }
 
+/// Subcommands for `hsc perf`
+#[derive(Subcommand)]
+enum PerfSubcommand {
+    /// Benchmark S3 object operations (PUT / GET / LIST / DELETE)
+    Object {
+        #[command(subcommand)]
+        operation: PerfObjectOp,
+    },
+}
+
+/// Operation types for `hsc perf object`
+#[derive(Subcommand)]
+enum PerfObjectOp {
+    /// Benchmark PUT (upload) operations
+    Put {
+        /// S3 URI prefix where objects will be written (s3://bucket[/prefix])
+        path: String,
+        /// Object size to upload, e.g. 4m, 256k, 1g
+        #[arg(long, value_name = "SIZE", value_parser = parse_size)]
+        size: u64,
+        /// Number of objects to PUT (default: 100; mutually exclusive with --duration)
+        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
+        count: Option<u64>,
+        /// Run for this many seconds instead of a fixed count
+        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
+        duration_secs: Option<u64>,
+        /// Number of parallel workers (default: 1)
+        #[arg(long, default_value = "1", value_name = "N")]
+        workers: usize,
+        /// Multipart threshold and part size (default: 8m); uploads exceeding this use multipart
+        #[arg(long, default_value = "8m", value_name = "SIZE", value_parser = parse_size,
+              conflicts_with = "disable_multipart")]
+        part_size: u64,
+        /// Always use a single PUT regardless of object size (conflicts with --part-size)
+        #[arg(long, conflicts_with = "part_size")]
+        disable_multipart: bool,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Benchmark GET (download) operations
+    Get {
+        /// S3 URI prefix where objects to download reside (s3://bucket[/prefix])
+        path: String,
+        /// Number of GET operations to perform (default: 100; mutually exclusive with --duration)
+        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
+        count: Option<u64>,
+        /// Run for this many seconds instead of a fixed count
+        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
+        duration_secs: Option<u64>,
+        /// Number of parallel workers (default: 1)
+        #[arg(long, default_value = "1", value_name = "N")]
+        workers: usize,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Benchmark LIST (ListObjectsV2) operations
+    List {
+        /// S3 URI prefix to list (s3://bucket[/prefix])
+        path: String,
+        /// Number of ListObjectsV2 API calls to make (default: 100; mutually exclusive with --duration)
+        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
+        count: Option<u64>,
+        /// Run for this many seconds instead of a fixed count
+        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
+        duration_secs: Option<u64>,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Benchmark DELETE operations
+    Delete {
+        /// S3 URI prefix whose objects will be deleted (s3://bucket[/prefix])
+        path: String,
+        /// Maximum number of objects to delete (default: 100; mutually exclusive with --duration)
+        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
+        count: Option<u64>,
+        /// Run for this many seconds instead of a fixed count
+        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
+        duration_secs: Option<u64>,
+        /// Number of parallel batch-delete workers (default: 1)
+        #[arg(long, default_value = "1", value_name = "N")]
+        workers: usize,
+        /// Emit structured JSON output
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 /// Parse a human-readable size string into bytes.
 /// Accepted suffixes: b/B (bytes), k/K (KiB), m/M (MiB), g/G (GiB).
 /// A bare number is treated as bytes.
@@ -409,6 +504,22 @@ fn parse_size(s: &str) -> Result<u64, String> {
         .parse()
         .map_err(|_| format!("invalid size '{s}': expected a number with optional suffix k/m/g"))?;
     Ok(base * mult)
+}
+
+/// Parse an S3 URI into (bucket, prefix) for perf commands.
+/// Accepts `s3://bucket` or `s3://bucket/prefix`.
+fn parse_s3_path_for_perf(path: &str) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let stripped = path
+        .strip_prefix("s3://")
+        .ok_or_else(|| format!("expected s3:// URI, got '{}'", path))?;
+    let (bucket, prefix) = match stripped.find('/') {
+        Some(pos) => (stripped[..pos].to_string(), stripped[pos + 1..].to_string()),
+        None => (stripped.to_string(), String::new()),
+    };
+    if bucket.is_empty() {
+        return Err("bucket name must not be empty".into());
+    }
+    Ok((bucket, prefix))
 }
 
 /// Resolve effective multipart threshold and chunk size.
@@ -772,5 +883,89 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
         }
+        Commands::Perf {
+            subcommand: PerfSubcommand::Object { operation },
+        } => match operation {
+            PerfObjectOp::Put {
+                path,
+                size,
+                count,
+                duration_secs,
+                workers,
+                part_size,
+                disable_multipart,
+                json,
+            } => {
+                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+                commands::perf_object::run_put(
+                    &client,
+                    &bucket,
+                    &prefix,
+                    size,
+                    count,
+                    duration_secs,
+                    workers,
+                    part_size,
+                    disable_multipart,
+                    json,
+                )
+                .await
+            }
+            PerfObjectOp::Get {
+                path,
+                count,
+                duration_secs,
+                workers,
+                json,
+            } => {
+                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+                commands::perf_object::run_get(
+                    &client,
+                    &bucket,
+                    &prefix,
+                    count,
+                    duration_secs,
+                    workers,
+                    json,
+                )
+                .await
+            }
+            PerfObjectOp::List {
+                path,
+                count,
+                duration_secs,
+                json,
+            } => {
+                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+                commands::perf_object::run_list(
+                    &client,
+                    &bucket,
+                    &prefix,
+                    count,
+                    duration_secs,
+                    json,
+                )
+                .await
+            }
+            PerfObjectOp::Delete {
+                path,
+                count,
+                duration_secs,
+                workers,
+                json,
+            } => {
+                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+                commands::perf_object::run_delete(
+                    &client,
+                    &bucket,
+                    &prefix,
+                    count,
+                    duration_secs,
+                    workers,
+                    json,
+                )
+                .await
+            }
+        },
     }
 }
