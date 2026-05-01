@@ -35,13 +35,8 @@ OUT=$($BINARY hash --json "$TEST_DIR/a/same.txt" --algorithm MD5 2>/dev/null)
 echo "$OUT" | grep -q '"algorithm": "MD5"'
 if [ $? -eq 0 ]; then pass "hash --json emits JSON"; else fail "hash --json"; fi
 
-$BINARY verify "$TEST_DIR/a/same.txt" "$TEST_DIR/b/same.txt" >/dev/null 2>&1
-if [ $? -eq 0 ]; then pass "verify succeeds for identical files"; else fail "verify identical"; fi
-
-OUT=$($BINARY verify --json "$TEST_DIR/a/same.txt" "$TEST_DIR/b/diff.txt" 2>/dev/null)
-STATUS=$?
-echo "$OUT" | grep -q '"verified": false'
-if [ $STATUS -eq 1 ] && [ $? -eq 0 ]; then pass "verify --json reports mismatches"; else fail "verify mismatch json"; fi
+$BINARY cmp "$TEST_DIR/a/same.txt" "$TEST_DIR/b/same.txt" >/dev/null 2>&1
+if [ $? -eq 0 ]; then pass "cmp succeeds for identical files"; else fail "cmp identical"; fi
 
 OUT=$($BINARY cmp --json "$TEST_DIR/a/same.txt" "$TEST_DIR/b/diff.txt" 2>/dev/null)
 STATUS=$?

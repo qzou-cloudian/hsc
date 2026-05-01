@@ -705,7 +705,7 @@ else
     error "hash --algorithm MD5: unexpected output (got: '$_md5_out')"
 fi
 
-_hash_json=$($BINARY hash --json "s3://$BUCKET_NAME/testfile_1k.dat" 2>/dev/null)
+_hash_json=$($BINARY hash --json "$TEST_DIR/testfile_1k.dat" 2>/dev/null)
 if echo "$_hash_json" | grep -q '"algorithm"' && echo "$_hash_json" | grep -q '"value"'; then
     success "hash --json: produced JSON with algorithm and value fields"
 else

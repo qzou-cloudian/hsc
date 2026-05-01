@@ -17,6 +17,8 @@ Cargo.lock
 Thumbs.db
 
 # Test artifacts
+/test_data/
+/rerun_failed.sh
 /test-*
 *.tmp
 
