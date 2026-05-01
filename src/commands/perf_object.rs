@@ -144,22 +144,22 @@ pub async fn run_put(
     bucket: &str,
     prefix: &str,
     size: u64,
-    count: Option<u64>,
+    objects: Option<u64>,
     duration_secs: Option<u64>,
-    workers: usize,
+    threads: usize,
     part_size: u64,
     disable_multipart: bool,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !json {
         println!(
-            "PUT benchmark: s3://{}/{}  size={} B  workers={}  {}",
+            "PUT benchmark: s3://{}/{}  size={} B  threads={}  {}",
             bucket,
             prefix,
             size,
-            workers,
-            count
-                .map(|n| format!("count={}", n))
+            threads,
+            objects
+                .map(|n| format!("objects={}", n))
                 .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
                 .unwrap_or_default()
         );
@@ -179,7 +179,7 @@ pub async fn run_put(
     };
     let sse = SseConfig::default();
 
-    let sem = Arc::new(Semaphore::new(workers));
+    let sem = Arc::new(Semaphore::new(threads));
     let counter = Arc::new(AtomicU64::new(0));
     let deadline = duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s));
 
@@ -190,7 +190,7 @@ pub async fn run_put(
 
     loop {
         // Check stop condition
-        let done = match (count, deadline) {
+        let done = match (objects, deadline) {
             (Some(n), _) => counter.load(Ordering::Relaxed) >= n,
             (_, Some(dl)) => Instant::now() >= dl,
             (None, None) => false,
@@ -199,8 +199,8 @@ pub async fn run_put(
             break;
         }
 
-        // Check if we've dispatched enough tasks (count mode)
-        if let Some(n) = count {
+        // Check if we've dispatched enough tasks (objects mode)
+        if let Some(n) = objects {
             if idx >= n {
                 break;
             }
@@ -267,7 +267,7 @@ pub async fn run_put(
                 Ok(Ok(lat)) => {
                     latencies.push(lat);
                     if !json {
-                        print_progress(counter.load(Ordering::Relaxed), count);
+                        print_progress(counter.load(Ordering::Relaxed), objects);
                     }
                 }
                 Ok(Err(e)) => eprintln!("\nPUT error: {}", e),
@@ -282,7 +282,7 @@ pub async fn run_put(
             Ok(Ok(lat)) => {
                 latencies.push(lat);
                 if !json {
-                    print_progress(counter.load(Ordering::Relaxed), count);
+                    print_progress(counter.load(Ordering::Relaxed), objects);
                 }
             }
             Ok(Err(e)) => eprintln!("\nPUT error: {}", e),
@@ -305,7 +305,7 @@ pub async fn run_put(
             operation: "put".to_string(),
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
-            workers,
+            workers: threads,
             object_size_bytes: Some(size),
             operations_completed: ops,
             elapsed_secs: elapsed,
@@ -338,21 +338,21 @@ pub async fn run_get(
     client: &Client,
     bucket: &str,
     prefix: &str,
-    count: Option<u64>,
+    objects: Option<u64>,
     duration_secs: Option<u64>,
-    workers: usize,
+    threads: usize,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let limit = count.unwrap_or(100);
+    let limit = objects.unwrap_or(100);
 
     if !json {
         println!(
-            "GET benchmark: s3://{}/{}  workers={}  {}",
+            "GET benchmark: s3://{}/{}  threads={}  {}",
             bucket,
             prefix,
-            workers,
-            count
-                .map(|n| format!("count={}", n))
+            threads,
+            objects
+                .map(|n| format!("objects={}", n))
                 .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
                 .unwrap_or_default()
         );
@@ -367,7 +367,7 @@ pub async fn run_get(
         eprintln!("  Found {} objects", keys.len());
     }
 
-    let sem = Arc::new(Semaphore::new(workers));
+    let sem = Arc::new(Semaphore::new(threads));
     let counter = Arc::new(AtomicU64::new(0));
     let deadline = duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s));
 
@@ -378,7 +378,7 @@ pub async fn run_get(
     let mut dispatched = 0u64;
 
     loop {
-        let done = match (count, deadline) {
+        let done = match (objects, deadline) {
             (Some(n), _) => counter.load(Ordering::Relaxed) >= n,
             (_, Some(dl)) => Instant::now() >= dl,
             (None, None) => false,
@@ -386,7 +386,7 @@ pub async fn run_get(
         if done {
             break;
         }
-        if let Some(n) = count {
+        if let Some(n) = objects {
             if dispatched >= n {
                 break;
             }
@@ -430,7 +430,7 @@ pub async fn run_get(
                 Ok(Ok((lat, _bytes))) => {
                     latencies.push(lat);
                     if !json {
-                        print_progress(counter.load(Ordering::Relaxed), count);
+                        print_progress(counter.load(Ordering::Relaxed), objects);
                     }
                 }
                 Ok(Err(e)) => eprintln!("\nGET error: {}", e),
@@ -444,7 +444,7 @@ pub async fn run_get(
             Ok(Ok((lat, _bytes))) => {
                 latencies.push(lat);
                 if !json {
-                    print_progress(counter.load(Ordering::Relaxed), count);
+                    print_progress(counter.load(Ordering::Relaxed), objects);
                 }
             }
             Ok(Err(e)) => eprintln!("\nGET error: {}", e),
@@ -483,7 +483,7 @@ pub async fn run_get(
             operation: "get".to_string(),
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
-            workers,
+            workers: threads,
             object_size_bytes: if obj_size > 0 { Some(obj_size) } else { None },
             operations_completed: ops,
             elapsed_secs: elapsed,
@@ -517,7 +517,7 @@ pub async fn run_list(
     client: &Client,
     bucket: &str,
     prefix: &str,
-    count: Option<u64>,
+    objects: Option<u64>,
     duration_secs: Option<u64>,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -526,22 +526,22 @@ pub async fn run_list(
             "LIST benchmark: s3://{}/{}  {}",
             bucket,
             prefix,
-            count
-                .map(|n| format!("count={}", n))
+            objects
+                .map(|n| format!("objects={}", n))
                 .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
                 .unwrap_or_default()
         );
     }
 
     let deadline = duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s));
-    let limit = count.unwrap_or(100);
+    let limit = objects.unwrap_or(100);
 
     let mut latencies: Vec<f64> = Vec::new();
     let mut ops: u64 = 0;
     let wall_start = Instant::now();
 
     loop {
-        let done = match (count, deadline) {
+        let done = match (objects, deadline) {
             (Some(n), _) => ops >= n,
             (_, Some(dl)) => Instant::now() >= dl,
             (None, None) => ops >= limit,
@@ -561,7 +561,7 @@ pub async fn run_list(
         ops += 1;
 
         if !json {
-            print_progress(ops, count);
+            print_progress(ops, objects);
         }
     }
 
@@ -608,21 +608,21 @@ pub async fn run_delete(
     client: &Client,
     bucket: &str,
     prefix: &str,
-    count: Option<u64>,
+    objects: Option<u64>,
     duration_secs: Option<u64>,
-    workers: usize,
+    threads: usize,
     json: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let limit = count.unwrap_or(100);
+    let limit = objects.unwrap_or(100);
 
     if !json {
         println!(
-            "DELETE benchmark: s3://{}/{}  workers={}  {}",
+            "DELETE benchmark: s3://{}/{}  threads={}  {}",
             bucket,
             prefix,
-            workers,
-            count
-                .map(|n| format!("count={}", n))
+            threads,
+            objects
+                .map(|n| format!("objects={}", n))
                 .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
                 .unwrap_or_default()
         );
@@ -640,7 +640,7 @@ pub async fn run_delete(
     // Batch into chunks of 1000 (S3 limit per DeleteObjects call)
     let batches: Vec<Vec<String>> = keys.chunks(1000).map(|c| c.to_vec()).collect();
 
-    let sem = Arc::new(Semaphore::new(workers));
+    let sem = Arc::new(Semaphore::new(threads));
     let counter = Arc::new(AtomicU64::new(0));
     let wall_start = Instant::now();
 
@@ -684,7 +684,7 @@ pub async fn run_delete(
                 Ok(Ok(lat)) => {
                     latencies.push(lat);
                     if !json {
-                        print_progress(counter.load(Ordering::Relaxed), count);
+                        print_progress(counter.load(Ordering::Relaxed), objects);
                     }
                 }
                 Ok(Err(e)) => eprintln!("\nDELETE error: {}", e),
@@ -698,7 +698,7 @@ pub async fn run_delete(
             Ok(Ok(lat)) => {
                 latencies.push(lat);
                 if !json {
-                    print_progress(counter.load(Ordering::Relaxed), count);
+                    print_progress(counter.load(Ordering::Relaxed), objects);
                 }
             }
             Ok(Err(e)) => eprintln!("\nDELETE error: {}", e),
@@ -720,7 +720,7 @@ pub async fn run_delete(
             operation: "delete".to_string(),
             bucket: bucket.to_string(),
             prefix: prefix.to_string(),
-            workers,
+            workers: threads,
             object_size_bytes: None,
             operations_completed: ops,
             elapsed_secs: elapsed,

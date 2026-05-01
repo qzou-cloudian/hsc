@@ -415,14 +415,14 @@ enum PerfObjectOp {
         #[arg(long, value_name = "SIZE", value_parser = parse_size)]
         size: u64,
         /// Number of objects to PUT (default: 100; mutually exclusive with --duration)
-        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
-        count: Option<u64>,
-        /// Run for this many seconds instead of a fixed count
-        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
-        duration_secs: Option<u64>,
-        /// Number of parallel workers (default: 1)
+        #[arg(long, value_name = "N", conflicts_with = "duration")]
+        objects: Option<u64>,
+        /// Run for a fixed duration, e.g. 30s, 5m (mutually exclusive with --objects)
+        #[arg(long, value_name = "DURATION", value_parser = parse_duration, conflicts_with = "objects")]
+        duration: Option<u64>,
+        /// Number of parallel threads (default: 1)
         #[arg(long, default_value = "1", value_name = "N")]
-        workers: usize,
+        threads: usize,
         /// Multipart threshold and part size (default: 8m); uploads exceeding this use multipart
         #[arg(long, default_value = "8m", value_name = "SIZE", value_parser = parse_size,
               conflicts_with = "disable_multipart")]
@@ -439,14 +439,14 @@ enum PerfObjectOp {
         /// S3 URI prefix where objects to download reside (s3://bucket[/prefix])
         path: String,
         /// Number of GET operations to perform (default: 100; mutually exclusive with --duration)
-        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
-        count: Option<u64>,
-        /// Run for this many seconds instead of a fixed count
-        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
-        duration_secs: Option<u64>,
-        /// Number of parallel workers (default: 1)
+        #[arg(long, value_name = "N", conflicts_with = "duration")]
+        objects: Option<u64>,
+        /// Run for a fixed duration, e.g. 30s, 5m (mutually exclusive with --objects)
+        #[arg(long, value_name = "DURATION", value_parser = parse_duration, conflicts_with = "objects")]
+        duration: Option<u64>,
+        /// Number of parallel threads (default: 1)
         #[arg(long, default_value = "1", value_name = "N")]
-        workers: usize,
+        threads: usize,
         /// Emit structured JSON output
         #[arg(long)]
         json: bool,
@@ -456,11 +456,11 @@ enum PerfObjectOp {
         /// S3 URI prefix to list (s3://bucket[/prefix])
         path: String,
         /// Number of ListObjectsV2 API calls to make (default: 100; mutually exclusive with --duration)
-        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
-        count: Option<u64>,
-        /// Run for this many seconds instead of a fixed count
-        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
-        duration_secs: Option<u64>,
+        #[arg(long, value_name = "N", conflicts_with = "duration")]
+        objects: Option<u64>,
+        /// Run for a fixed duration, e.g. 30s, 5m (mutually exclusive with --objects)
+        #[arg(long, value_name = "DURATION", value_parser = parse_duration, conflicts_with = "objects")]
+        duration: Option<u64>,
         /// Emit structured JSON output
         #[arg(long)]
         json: bool,
@@ -470,18 +470,36 @@ enum PerfObjectOp {
         /// S3 URI prefix whose objects will be deleted (s3://bucket[/prefix])
         path: String,
         /// Maximum number of objects to delete (default: 100; mutually exclusive with --duration)
-        #[arg(long, value_name = "N", conflicts_with = "duration_secs")]
-        count: Option<u64>,
-        /// Run for this many seconds instead of a fixed count
-        #[arg(long, value_name = "SECONDS", conflicts_with = "count")]
-        duration_secs: Option<u64>,
-        /// Number of parallel batch-delete workers (default: 1)
+        #[arg(long, value_name = "N", conflicts_with = "duration")]
+        objects: Option<u64>,
+        /// Run for a fixed duration, e.g. 30s, 5m (mutually exclusive with --objects)
+        #[arg(long, value_name = "DURATION", value_parser = parse_duration, conflicts_with = "objects")]
+        duration: Option<u64>,
+        /// Number of parallel batch-delete threads (default: 1)
         #[arg(long, default_value = "1", value_name = "N")]
-        workers: usize,
+        threads: usize,
         /// Emit structured JSON output
         #[arg(long)]
         json: bool,
     },
+}
+
+/// Parse a human-readable duration string into seconds.
+/// Accepted suffixes: s/S (seconds), m/M (minutes).
+/// A bare number is treated as seconds.
+fn parse_duration(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    let (num, mult) = if let Some(n) = s.strip_suffix(['M', 'm']) {
+        (n, 60u64)
+    } else if let Some(n) = s.strip_suffix(['S', 's']) {
+        (n, 1u64)
+    } else {
+        (s, 1u64)
+    };
+    let base: u64 = num.parse().map_err(|_| {
+        format!("invalid duration '{s}': expected a number with optional suffix s/m")
+    })?;
+    Ok(base * mult)
 }
 
 /// Parse a human-readable size string into bytes.
@@ -889,9 +907,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             PerfObjectOp::Put {
                 path,
                 size,
-                count,
-                duration_secs,
-                workers,
+                objects,
+                duration,
+                threads,
                 part_size,
                 disable_multipart,
                 json,
@@ -902,9 +920,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &bucket,
                     &prefix,
                     size,
-                    count,
-                    duration_secs,
-                    workers,
+                    objects,
+                    duration,
+                    threads,
                     part_size,
                     disable_multipart,
                     json,
@@ -913,56 +931,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             PerfObjectOp::Get {
                 path,
-                count,
-                duration_secs,
-                workers,
+                objects,
+                duration,
+                threads,
                 json,
             } => {
                 let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
                 commands::perf_object::run_get(
-                    &client,
-                    &bucket,
-                    &prefix,
-                    count,
-                    duration_secs,
-                    workers,
-                    json,
+                    &client, &bucket, &prefix, objects, duration, threads, json,
                 )
                 .await
             }
             PerfObjectOp::List {
                 path,
-                count,
-                duration_secs,
+                objects,
+                duration,
                 json,
             } => {
                 let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
-                commands::perf_object::run_list(
-                    &client,
-                    &bucket,
-                    &prefix,
-                    count,
-                    duration_secs,
-                    json,
-                )
-                .await
+                commands::perf_object::run_list(&client, &bucket, &prefix, objects, duration, json)
+                    .await
             }
             PerfObjectOp::Delete {
                 path,
-                count,
-                duration_secs,
-                workers,
+                objects,
+                duration,
+                threads,
                 json,
             } => {
                 let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
                 commands::perf_object::run_delete(
-                    &client,
-                    &bucket,
-                    &prefix,
-                    count,
-                    duration_secs,
-                    workers,
-                    json,
+                    &client, &bucket, &prefix, objects, duration, threads, json,
                 )
                 .await
             }
