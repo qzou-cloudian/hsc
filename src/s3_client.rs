@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::debug_interceptor::DebugInterceptor;
+use crate::redirect_interceptor::{RedirectInterceptor, RedirectRetryClassifier};
 
 /// A `rustls` `ServerCertVerifier` that accepts any certificate.
 /// Used only when `--no-verify-ssl` is requested (e.g. self-signed cert testing).
@@ -325,6 +326,15 @@ pub async fn create_s3_client(
     if config.no_sign_request {
         s3_config_builder = s3_config_builder.interceptor(NoSignRequestInterceptor);
     }
+
+    // Enable automatic HTTP 307 Temporary Redirect following.
+    // S3-compatible services (e.g. Cloudian HyperStore) use 307 for load-balancing:
+    // a node redirects the client to the node that owns the data.  The interceptor
+    // stores the redirect Location in the config bag; the classifier triggers a retry;
+    // and modify_before_signing updates the URI so the retry is correctly re-signed.
+    s3_config_builder = s3_config_builder
+        .interceptor(RedirectInterceptor::default())
+        .retry_classifier(RedirectRetryClassifier::default());
 
     let s3_config = s3_config_builder.build();
 

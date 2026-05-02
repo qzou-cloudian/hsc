@@ -8,7 +8,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaProvider};
+use crate::rdma::{RdmaInterceptor, RdmaEndpoint};
 #[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -68,7 +68,7 @@ pub async fn cmp(
     sse_c: Option<String>,
     sse_c_key: Option<String>,
     json: bool,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let has_range = range.is_some() || offset.is_some() || size.is_some();
     let compare = compare_paths(
@@ -159,7 +159,7 @@ pub async fn compare_paths(
     size: Option<u64>,
     sse_c: Option<String>,
     sse_c_key: Option<String>,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
 ) -> Result<CompareReport, Box<dyn std::error::Error>> {
     if range.is_some() && (offset.is_some() || size.is_some()) {
         return Err("Cannot specify both --range and --offset/--size".into());
@@ -351,7 +351,7 @@ async fn open_reader(
     limit: Option<u64>,
     sse_c: Option<&str>,
     sse_c_key: Option<&str>,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
 ) -> Result<Reader, Box<dyn std::error::Error>> {
     match parse_path(path)? {
         PathType::Local(local_path) => {

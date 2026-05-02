@@ -4,7 +4,7 @@ use crate::commands::rm;
 use aws_sdk_s3::Client;
 
 #[cfg(feature = "rdma")]
-use crate::rdma::RdmaProvider;
+use crate::rdma::RdmaEndpoint;
 #[cfg(feature = "rdma")]
 use std::sync::Arc;
 
@@ -20,7 +20,7 @@ pub async fn move_files(
     sse: SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // First, copy the files
     cp::copy(

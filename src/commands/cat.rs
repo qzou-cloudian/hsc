@@ -5,7 +5,7 @@ use tokio::fs::File;
 use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaProvider};
+use crate::rdma::{RdmaInterceptor, RdmaEndpoint};
 #[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -22,7 +22,7 @@ pub async fn cat(
     size: Option<u64>,
     part_number: Option<i32>,
     version_id: Option<String>,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Validate options
     if range.is_some() && (offset.is_some() || size.is_some()) {
@@ -79,7 +79,7 @@ struct S3CatOptions {
     part_number: Option<i32>,
     version_id: Option<String>,
     #[cfg(feature = "rdma")]
-    rdma: Option<Arc<dyn RdmaProvider>>,
+    rdma: Option<Arc<dyn RdmaEndpoint>>,
 }
 
 /// Read and output S3 object content

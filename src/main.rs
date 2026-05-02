@@ -6,6 +6,7 @@ mod filters;
 mod path_utils;
 #[cfg(feature = "rdma")]
 mod rdma;
+mod redirect_interceptor;
 mod s3_client;
 
 #[derive(Parser)]
@@ -615,9 +616,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create an RDMA provider once if enabled; passed to every command that
     // performs getObject / putObject / uploadPart.
     #[cfg(feature = "rdma")]
-    let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaProvider>> =
+    let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaEndpoint>> =
         match &client_config_clone.rdma_provider {
-            Some(p) => match rdma::create_provider(p, client_config_clone.debug) {
+            Some(p) => match rdma::create_endpoint(p, client_config_clone.debug, rdma::EndpointRole::Client, &Default::default()) {
                 Ok(provider) => Some(provider),
                 Err(e) => {
                     eprintln!(
