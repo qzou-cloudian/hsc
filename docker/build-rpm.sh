@@ -2,7 +2,7 @@
 # Package pre-built hsc artifacts as an RPM for Rocky Linux 8.
 #
 # Expected bind-mounts:
-#   /pkg  — dist/rocky-8/ directory containing hsc (and optionally libs3_rdma_cuobj_client.so)
+#   /pkg  — dist/rocky-8/ directory containing hsc (and optionally libs3rdmacuobjclient.so)
 #
 # Required environment:
 #   VERSION — package version string (e.g. "0.2.0")
@@ -10,7 +10,7 @@ set -e
 
 VERSION=${VERSION:?VERSION env var must be set}
 BINARY=/pkg/hsc
-SO=/pkg/libs3_rdma_cuobj_client.so
+SO=/pkg/libs3rdmacuobjclient.so
 
 echo "==> Packaging hsc v${VERSION} as RPM (Rocky Linux 8)"
 
@@ -22,10 +22,10 @@ cp "$BINARY" ~/rpmbuild/SOURCES/hsc
 SO_INSTALL=""
 SO_FILES=""
 if [ -f "$SO" ]; then
-    cp "$SO" ~/rpmbuild/SOURCES/libs3_rdma_cuobj_client.so
-    SO_INSTALL="install -Dm755 %{_sourcedir}/libs3_rdma_cuobj_client.so %{buildroot}%{_libdir}/libs3_rdma_cuobj_client.so"
-    SO_FILES="%{_libdir}/libs3_rdma_cuobj_client.so"
-    echo "==> Including libs3_rdma_cuobj_client.so"
+    cp "$SO" ~/rpmbuild/SOURCES/libs3rdmacuobjclient.so
+    SO_INSTALL="install -Dm755 %{_sourcedir}/libs3rdmacuobjclient.so %{buildroot}%{_libdir}/libs3rdmacuobjclient.so"
+    SO_FILES="%{_libdir}/libs3rdmacuobjclient.so"
+    echo "==> Including libs3rdmacuobjclient.so"
 fi
 
 cat > ~/rpmbuild/SPECS/hsc.spec << EOF
