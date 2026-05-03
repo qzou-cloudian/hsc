@@ -12,8 +12,8 @@ categories = ["command-line-utilities"]
 [features]
 # Enable RDMA support (interceptor + mock provider)
 rdma = ["dep:s3-rdma"]
-# Enable real NVIDIA cuObject RDMA provider (requires cuObject SDK)
-cuobj = ["rdma", "s3-rdma/cuobj-client"]
+# Enable real RDMA provider plugin (loads libs3rdmaclient.so at runtime)
+plugin = ["rdma", "s3-rdma/plugin-client"]
 
 [dependencies]
 aws-config = "1.8.14"
