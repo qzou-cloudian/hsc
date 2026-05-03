@@ -9,7 +9,7 @@ use tokio::fs;
 use walkdir::WalkDir;
 
 #[cfg(feature = "rdma")]
-use crate::rdma::RdmaEndpoint;
+use crate::rdma::RdmaProvider;
 #[cfg(feature = "rdma")]
 use std::sync::Arc;
 
@@ -26,7 +26,7 @@ pub async fn sync(
     sse: SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::parse_checksum;
     let (checksum_mode, checksum_algorithm) = parse_checksum(checksum)?;
@@ -104,7 +104,7 @@ async fn sync_local_to_s3(
     sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::upload_file;
 
@@ -203,7 +203,7 @@ async fn sync_s3_to_local(
     checksum_mode: Option<ChecksumMode>,
     delete: bool,
     sse: &SseConfig,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::commands::cp::download_file;
 

@@ -616,9 +616,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create an RDMA provider once if enabled; passed to every command that
     // performs getObject / putObject / uploadPart.
     #[cfg(feature = "rdma")]
-    let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaEndpoint>> =
+    let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaProvider>> =
         match &client_config_clone.rdma_provider {
-            Some(p) => match rdma::create_endpoint(p, client_config_clone.debug, rdma::EndpointRole::Client, &Default::default()) {
+            Some(p) => match rdma::create_provider(p, client_config_clone.debug, rdma::RdmaRole::Client, &Default::default()) {
                 Ok(provider) => Some(provider),
                 Err(e) => {
                     eprintln!(

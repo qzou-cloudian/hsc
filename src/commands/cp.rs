@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaEndpoint};
+use crate::rdma::{RdmaInterceptor, RdmaProvider};
 
 #[cfg(feature = "rdma")]
 use std::sync::{
@@ -59,7 +59,7 @@ pub async fn copy(
     sse: SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let source_type = parse_path(source)?;
     let dest_type = parse_path(dest)?;
@@ -136,7 +136,7 @@ async fn copy_single(
     sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match (&source, &dest) {
         (PathType::Local(src), PathType::S3 { bucket, key }) => {
@@ -300,7 +300,7 @@ pub async fn upload_file(
     sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Check file size
     let metadata = fs::metadata(local_path).await?;
@@ -489,7 +489,7 @@ async fn upload_file_multipart(
     checksum_mode: Option<ChecksumMode>,
     checksum_algorithm: Option<ChecksumAlgorithm>,
     sse: &SseConfig,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "Using multipart upload for {} ({} bytes, {} bytes per part)",
@@ -832,7 +832,7 @@ pub async fn download_file(
     local_path: &str,
     checksum_mode: Option<ChecksumMode>,
     sse: &SseConfig,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Create parent directories if needed
     if let Some(parent) = Path::new(local_path).parent() {
@@ -1017,7 +1017,7 @@ async fn copy_recursive(
     sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match (&source, &dest) {
         (PathType::Local(src), PathType::S3 { bucket, key }) => {
@@ -1080,7 +1080,7 @@ async fn upload_directory(
     sse: &SseConfig,
     multipart_threshold: u64,
     multipart_chunksize: u64,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let base_path = Path::new(local_dir);
 
@@ -1129,7 +1129,7 @@ async fn download_directory(
     local_dir: &str,
     filter: &FileFilter,
     sse: &SseConfig,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaEndpoint>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut continuation_token: Option<String> = None;
 
