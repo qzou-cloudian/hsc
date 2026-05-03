@@ -9,7 +9,7 @@ use super::cmp::compare_paths;
 use super::cp::{upload_file, SseConfig};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::RdmaProvider;
+use crate::rdma::RdmaClientProvider;
 #[cfg(feature = "rdma")]
 use std::sync::Arc;
 
@@ -498,7 +498,7 @@ pub async fn test_object(
     policy: &StoragePolicy,
     keep: bool,
     json: bool,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaProvider>>,
+    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaClientProvider>>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── 1. Prepare local file ─────────────────────────────────────────────────
     let (local_path, temp_file, file_size): (String, Option<PathBuf>, u64) = match (file, bytes) {

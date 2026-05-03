@@ -8,9 +8,9 @@
 //!
 //! ```rust,ignore
 //! use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-//! use crate::{MockRdmaProvider, RdmaInterceptor};
+//! use crate::{MockRdmaProvider, RdmaClientProvider, RdmaInterceptor};
 //!
-//! let provider = Arc::new(MockRdmaProvider::new(false, "/dev/shm".into(), 0));
+//! let provider: Arc<dyn RdmaClientProvider> = Arc::new(MockRdmaProvider::new(false, "/dev/shm".into(), 0));
 //! let confirmed = Arc::new(AtomicBool::new(false));
 //! // … register buffer and generate token …
 //! let interceptor = RdmaInterceptor::new_get(Arc::clone(&provider), token, size, Arc::clone(&confirmed), debug);
@@ -33,7 +33,7 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 
-use s3_rdma::RdmaProvider;
+use s3_rdma::RdmaClientProvider;
 
 // ── RdmaInterceptor ──────────────────────────────────────────────────────────
 
@@ -55,7 +55,7 @@ const CHECKSUM_HEADERS: &[&str] = &[
 ///    so the SDK does not validate the empty HTTP body, and sets
 ///    `rdma_confirmed` so the caller knows to use the pre-filled RDMA buffer.
 pub struct RdmaInterceptor {
-    provider: Arc<dyn RdmaProvider>,
+    provider: Arc<dyn RdmaClientProvider>,
     /// Pre-generated RDMA descriptor token (may be `|`-separated for multi-token).
     token: Vec<u8>,
     /// Byte count for the transfer (fallback for `x-amz-rdma-bytes` when absent).
@@ -88,7 +88,7 @@ impl RdmaInterceptor {
     /// Both must be `Some` or both `None`; passing one without the other is
     /// silently ignored.
     pub fn new_put(
-        provider: Arc<dyn RdmaProvider>,
+        provider: Arc<dyn RdmaClientProvider>,
         token: Vec<u8>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
@@ -109,7 +109,7 @@ impl RdmaInterceptor {
 
     /// Create an interceptor for a GET (download) request.
     pub fn new_get(
-        provider: Arc<dyn RdmaProvider>,
+        provider: Arc<dyn RdmaClientProvider>,
         token: Vec<u8>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
