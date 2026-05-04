@@ -17,7 +17,7 @@ struct Cli {
     #[arg(long, global = true)]
     debug: bool,
 
-    /// Enable RDMA transfers.  PROVIDER may be `plugin` or `mock`.
+    /// Enable RDMA transfers.  PROVIDER may be `rdma`, `auto` or `mock`.
     /// Omitting PROVIDER (bare `--rdma`) auto-selects the best available provider.
     #[cfg(feature = "rdma")]
     #[arg(long, global = true, num_args = 0..=1, value_name = "PROVIDER",

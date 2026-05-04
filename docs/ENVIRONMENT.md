@@ -37,7 +37,7 @@ export AWS_ENDPOINT_URL=http://minio:9000
 ### hsc-Specific Variables
 
 - **HSC_DEBUG**: Set to any non-empty value to enable debug output (same as `--debug`)
-- **HSC_RDMA**: RDMA provider selection — `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- **HSC_RDMA**: RDMA provider selection — `rdma`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
 - **HSC_RESOLVE**: Comma-separated `HOST:PORT:IP` overrides — maps hostnames to specific IPs
   without changing DNS (same format as `--resolve`, repeatable via `,`)
 

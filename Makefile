@@ -17,8 +17,8 @@
 
 # ── Configurable variables ────────────────────────────────────────────────────
 
-# Cargo features to enable (plugin | rdma | <empty>)
-FEATURES   ?= plugin
+# Cargo features to enable (cuobj | rdma | <empty>)
+FEATURES   ?= cuobj
 
 # CUDA / cuObject SDK root on the host (must contain include/cuobjclient.h)
 CUDA_DIR   ?= /usr/local/cuda-13.2
@@ -55,12 +55,12 @@ CUOBJ_ROOT_DIR=/usr/local/cuda \
 cargo build --release $(if $(FEATURES),--features $(FEATURES)) \
     --target-dir /cargo/target; \
 cp /cargo/target/release/hsc /out/; \
-if echo "$(FEATURES)" | grep -q plugin; then \
+if echo "$(FEATURES)" | grep -q cuobj; then \
     cargo build --release \
         --manifest-path ../s3-rdma/providers/client/Cargo.toml \
         --features cuobj \
-        --target-dir /cargo/target-plugin; \
-    cp /cargo/target-plugin/release/libs3rdmaclient.so /out/; \
+        --target-dir /cargo/target-cuobj; \
+    cp /cargo/target-cuobj/release/libs3rdmaclient.so /out/; \
 fi
 endef
 
@@ -146,8 +146,8 @@ help:
 	@echo "  clean-volumes        Remove Docker build-cache volumes (forces full Cargo rebuild)"
 	@echo ""
 	@echo "Variables (override on command line):"
-	@echo "  FEATURES   Cargo features  [default: plugin]"
-	@echo "             plugin — RDMA via RDMA plugin SDK (requires CUDA_DIR)"
+	@echo "  FEATURES   Cargo features  [default: cuobj]"
+	@echo "             cuobj — RDMA via RDMA cuobj SDK (requires CUDA_DIR)"
 	@echo "             rdma   — RDMA mock only (no CUDA needed)"
 	@echo "             (empty)— no RDMA support"
 	@echo "  CUDA_DIR   CUDA/cuObject SDK root  [default: /usr/local/cuda-13.2]"
@@ -156,9 +156,9 @@ help:
 	@echo ""
 	@echo "Output:"
 	@echo "  dist/ubuntu-24.04/hsc"
-	@echo "  dist/ubuntu-24.04/libs3rdmaclient.so  (when FEATURES=plugin)"
+	@echo "  dist/ubuntu-24.04/libs3rdmaclient.so  (when FEATURES=cuobj)"
 	@echo "  dist/ubuntu-24.04/hsc_<version>_amd64.deb"
 	@echo "  dist/rocky-8/hsc"
-	@echo "  dist/rocky-8/libs3rdmaclient.so        (when FEATURES=plugin)"
+	@echo "  dist/rocky-8/libs3rdmaclient.so        (when FEATURES=cuobj)"
 	@echo "  dist/rocky-8/hsc-<version>-1.el8.x86_64.rpm"
 	@echo ""

@@ -20,7 +20,7 @@ Available for all commands:
 --resolve <HOST:PORT:IP>     Map hostname to a specific IP (curl-compatible, repeatable).
                              Also read from HSC_RESOLVE (comma-separated).
 --rdma [PROVIDER]            Enable RDMA transfers (requires rdma feature build).
-                             PROVIDER: auto (default), cuobj, mock
+                             PROVIDER: rdma (default), auto, mock
 --version                    Show version information
 ```
 

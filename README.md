@@ -145,7 +145,7 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8 MiB)
 - `AWS_CONFIG_FILE` - Config file location
 - `AWS_SHARED_CREDENTIALS_FILE` - Credentials file location
 - `HSC_DEBUG` - Set to any non-empty value to enable debug output (equivalent to `--debug`)
-- `HSC_RDMA` - RDMA provider: `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- `HSC_RDMA` - RDMA provider: `rdma`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
 - `HSC_RESOLVE` - Comma-separated list of `HOST:PORT:IP` resolve overrides (same format as `--resolve`)
 
 ## Advanced Features
@@ -313,8 +313,8 @@ Build with RDMA support:
 # Mock provider (no hardware required, useful for testing)
 cargo build --release --features rdma
 
-# NVIDIA cuObject provider (requires cuObject SDK and libhsc_rdma_cuobj.so at runtime)
-cargo build --release --features cuobj
+# RDMA support (loads libs3rdmaclient.so at runtime; requires RDMA hardware)
+cargo build --release --features rdma
 ```
 
 Enable RDMA at runtime:
@@ -336,7 +336,7 @@ Configure via `~/.aws/config`:
 ```ini
 [default]
 rdma = auto       # enable RDMA, auto-select provider
-# rdma = cuobj # prefer cuObject provider
+# rdma = rdma     # require RDMA plugin specifically
 # rdma = mock     # always use mock provider
 # rdma = false    # disable
 ```
@@ -452,4 +452,3 @@ Contributions welcome! Please feel free to submit issues or pull requests.
 - [AWS CLI S3 Commands](https://docs.aws.amazon.com/cli/latest/reference/s3/)
 - [MinIO Client](https://min.io/docs/minio/linux/reference/minio-mc.html)
 - [AWS SDK for Rust](https://github.com/awslabs/aws-sdk-rust)
-- [NVIDIA cuObject: GPUDirect Storage for Objects](https://docs.nvidia.com/gpudirect-storage/cuobject/)

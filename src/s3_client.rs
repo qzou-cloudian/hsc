@@ -231,8 +231,7 @@ pub struct S3ClientConfig {
     /// Entries are parsed by [`parse_resolve_entry`]; invalid entries are logged
     /// as warnings and skipped.
     pub resolve: Vec<String>,
-    /// Normalized RDMA provider name (`"cuobj"` / `"mock"`), or `None` to disable RDMA.
-    /// Use `"plugin"` or `"cuobj"` interchangeably for the plugin-based provider.
+    /// Normalized RDMA provider name (`"rdma"` / `"mock"` / `"auto"`), or `None` to disable RDMA.
     #[allow(dead_code)]
     pub rdma_provider: Option<String>,
 }
@@ -269,7 +268,7 @@ impl Default for S3ClientConfig {
 /// - AWS_SECRET_ACCESS_KEY: Secret access key
 /// - AWS_SESSION_TOKEN: Session token (for temporary credentials)
 /// - HSC_RDMA: RDMA provider selection.  Accepted values:
-///   `cuobj` or `auto` (enable, auto-select provider), `mock` (use mock provider),
+///   `rdma` or `auto` (enable, auto-select provider), `mock` (use mock provider),
 ///   `true`/`1` (same as `auto`), `false`/`0` (disable).
 /// - HSC_RDMA_MOCK: Set to `true` or `1` to use mock RDMA provider
 /// - HSC_DEBUG: Set to a non-empty value to enable request/response header logging
@@ -484,10 +483,10 @@ pub async fn create_s3_client(
 /// Priority: CLI flag (already on config) > `HSC_RDMA` env > config file > default false.
 ///
 /// The `rdma` key in the config file accepts the same values as `HSC_RDMA`:
-/// `plugin`, `cuobj`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
+/// `rdma`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
 pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
     if config.rdma_provider.is_some() {
-        // Normalize the CLI-provided value (e.g. "auto" → "cuobj").
+        // Normalize the CLI-provided value (e.g. "auto" → actual provider).
         config.rdma_provider = config
             .rdma_provider
             .as_deref()
@@ -501,7 +500,6 @@ pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
         .unwrap_or_else(|| "default".to_string());
     let cfg_setting = load_rdma_settings(&profile);
 
-    // HSC_RDMA accepts: plugin, cuobj, auto, mock, true, 1, false, 0
     let env_provider = env::var("HSC_RDMA")
         .ok()
         .and_then(|v| parse_rdma_provider_value(&v));
@@ -643,19 +641,19 @@ fn profile_section_header(profile: &str) -> String {
 
 /// Parse an RDMA provider value into a normalized provider name.
 ///
-/// | Value                              | Result          |
-/// |------------------------------------|-----------------|
-/// | `mock`                             | `Some("mock")`  |
-/// | `plugin`, `cuobj`, `auto`, `true`, | `Some("cuobj")` |
-/// | `1`, `yes`, `on`                   |                 |
-/// | `false`, `0`, `no`, `off`, …       | `None`          |
+/// | Value                           | Result          |
+/// |---------------------------------|-----------------|
+/// | `mock`                          | `Some("mock")`  |
+/// | `rdma`                          | `Some("rdma")`  |
+/// | `auto`, `true`, `1`, `yes`, `on`| `Some("auto")`  |
+/// | `false`, `0`, `no`, `off`, …    | `None`          |
 ///
-/// `plugin` and `cuobj` are aliases for the same provider; `plugin` is the
-/// current preferred spelling (matching the Cargo feature name).
+/// The returned string is passed directly to `s3_rdma::create_client_provider`.
 fn parse_rdma_provider_value(value: &str) -> Option<String> {
     match value.to_lowercase().as_str() {
         "mock" => Some("mock".to_owned()),
-        "plugin" | "cuobj" | "auto" | "true" | "1" | "yes" | "on" => Some("cuobj".to_owned()),
+        "rdma" => Some("rdma".to_owned()),
+        "auto" | "true" | "1" | "yes" | "on" => Some("auto".to_owned()),
         _ => None,
     }
 }

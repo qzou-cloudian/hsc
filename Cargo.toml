@@ -10,12 +10,9 @@ keywords = ["s3", "aws", "cli", "cloud-storage"]
 categories = ["command-line-utilities"]
 
 [features]
-# Enable RDMA support with the plugin client (loads libs3rdmaclient.so at
-# runtime) and mock provider.  The cuobj client is always included so that
-# `--rdma plugin` / `--rdma auto` work out of the box.
+# Enable RDMA support (loads libs3rdmaclient.so at runtime via rdma-client
+# feature, plus mock provider for testing).
 rdma = ["dep:s3-rdma", "s3-rdma/rdma-client"]
-# Alias for `rdma`; kept for backward compatibility with existing build scripts.
-cuobj = ["rdma"]
 
 [dependencies]
 aws-config = "1.8.14"

@@ -44,11 +44,15 @@ All notable changes to hsc will be documented in this file.
   - `--duration-secs` → `--duration` (now accepts `30s` / `5m` suffixes in
     addition to plain seconds; e.g. `--duration 2m`)
 
-- **RDMA provider spelling**: `plugin` is now the preferred spelling for the
-  plugin-based cuObject provider (matching the Cargo feature name).  The old
-  value `cuobj` continues to work as an alias.  Accepted values for `--rdma`,
-  `HSC_RDMA`, and the `rdma` config-file key are now:
-  `plugin`, `cuobj`, `auto`, `true`/`1` (enable), `mock`, `false`/`0` (disable).
+- **RDMA provider names**: `cuobj` and `plugin` are no longer valid provider
+  names.  The accepted values for `--rdma`, `HSC_RDMA`, and the `rdma`
+  config-file key are now: `rdma` (real plugin), `mock`, `auto`,
+  `true`/`1`/`yes`/`on` (same as `auto`), `false`/`0`/`no`/`off` (disable).
+
+- **`cuobj` Cargo feature removed**: `--features cuobj` no longer exists; use
+  `--features rdma` instead.  The `rdma` feature now always includes the
+  plugin client (`s3-rdma/rdma-client`), so a separate `cuobj` alias is
+  unnecessary.
 
 - **RDMA provider trait** narrowed to `RdmaClientProvider` (client-only
   operations); `hsc` never handles server-side RDMA so the broader trait was
