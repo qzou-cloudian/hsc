@@ -2,19 +2,84 @@
 
 All notable changes to hsc will be documented in this file.
 
-## [Unreleased]
+## [0.3.3] - 2026-05-04
 
 ### Added
-- `test object` command: upload a local file (or randomly-generated data) to S3 and verify it
-  with systematic byte-range comparisons covering multipart part boundaries, server chunk
-  boundaries, and EC stripe boundaries (C/4 and C/2 within each chunk)
-  - `-f <path>`: use an existing local file; `-b <size>`: generate random test data (e.g. `6m`)
-  - `--chunk-size`: server storage chunk size (default: `4m`)
-  - `--part-size`: multipart upload part size/threshold (default: `8m`)
-  - `--policy ec|replica`: skip EC stripe boundary tests for replicated buckets (default: `ec`)
-  - `--keep`: retain the S3 object after the test; default is to delete on completion
-  - `--json`: emit a structured JSON summary including per-test pass/fail status
+
+- **`--resolve HOST:PORT:IP`** global flag (curl-compatible, repeatable) and
+  **`HSC_RESOLVE`** environment variable (comma-separated) to map an endpoint
+  hostname to a specific IP address without modifying DNS or `/etc/hosts`.
+  - Override happens at the DNS level: TLS SNI and the `Host` header keep the
+    original hostname, so servers with hostname-based certificates work correctly.
+  - CLI flags and `HSC_RESOLVE` entries are merged together.
+  - With `--debug`, each active mapping is logged as
+    `Debug: resolve override: <host> → <ip>`.
+
+- **`hsc perf object`** benchmark subcommand for S3 performance testing:
+  - `put`    — sustained upload throughput (objects/s, MiB/s)
+  - `get`    — sustained download throughput
+  - `list`   — `ListObjectsV2` call rate
+  - `delete` — batch-delete throughput
+  - `--objects N` (default: 100) or `--duration <N>s|<N>m` to bound the run
+  - `--threads N` for parallel workers (PUT and DELETE)
+  - `--part-size SIZE` / `--disable-multipart` for upload tuning (PUT)
+  - `--json` emits a structured JSON result
+
+- **`hsc test object`** command for S3 functional verification:
+  - Uploads a file (existing via `-f` or randomly generated via `-b SIZE`) and
+    validates it with systematic byte-range comparisons
+  - Covers multipart part boundaries, server chunk boundaries (`--chunk-size`,
+    default `4m`), and EC stripe boundaries (C/4 and C/2 within each chunk)
+  - `--policy ec|replica` — skip EC stripe tests for replicated buckets
+    (default: `ec`)
+  - `--keep` — retain the S3 object after the test (default: delete on success)
+  - `--json` — emit a structured JSON summary with per-test pass/fail status
   - Exits `1` if any comparison fails
+
+### Changed
+
+- **`hsc perf object` flags** renamed for clarity:
+  - `--count` → `--objects`
+  - `--workers` → `--threads`
+  - `--duration-secs` → `--duration` (now accepts `30s` / `5m` suffixes in
+    addition to plain seconds; e.g. `--duration 2m`)
+
+- **RDMA provider spelling**: `plugin` is now the preferred spelling for the
+  plugin-based cuObject provider (matching the Cargo feature name).  The old
+  value `cuobj` continues to work as an alias.  Accepted values for `--rdma`,
+  `HSC_RDMA`, and the `rdma` config-file key are now:
+  `plugin`, `cuobj`, `auto`, `true`/`1` (enable), `mock`, `false`/`0` (disable).
+
+- **RDMA provider trait** narrowed to `RdmaClientProvider` (client-only
+  operations); `hsc` never handles server-side RDMA so the broader trait was
+  unnecessary.
+
+- **RDMA runtime binary** renamed from `libs3rdmacuobjclient.so` to
+  `libs3rdmaclient.so` (Makefile and package build scripts updated).
+
+### Fixed
+
+- **Test scripts**: `hsc test object -f` flag now correctly writes the generated
+  test file to `$TEST_DIR` instead of a hard-coded path, avoiding permission
+  errors in restricted environments.
+
+- **Test file content**: functional test scripts now generate files with random
+  content (via `/dev/urandom`) rather than sparse zeros, so range-read bugs that
+  only manifest with non-zero byte patterns are detected.
+
+- **Test script cleanup**: `examples/s3_functional_test.sh` simplified to use
+  `hsc test object` for chunk-boundary and multipart verification; leftover
+  ad-hoc shell logic removed.
+
+- **`hash --json` test**: test suite now creates the input file locally before
+  running `hash --json`, fixing a spurious failure when the file was not present.
+
+### Build / CI
+
+- Added GitHub Actions release workflow with macOS cross-compilation support
+  (`macos-latest` for x86_64 targets).
+
+- Fixed `s3-rdma` stub feature name in CI configuration.
 
 ## [0.3.2] - 2026-04-03
 

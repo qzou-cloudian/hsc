@@ -124,6 +124,7 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8 MiB)
 --region <region>                # AWS region
 --endpoint-url <url>             # Custom S3 endpoint
 --no-verify-ssl                  # Disable SSL verification
+--resolve <HOST:PORT:IP>         # Map hostname to IP, curl-compatible (repeatable)
 --debug                          # Enable debug output
 --cli-connect-timeout <secs>     # TCP connect timeout (0 = no timeout)
 --cli-read-timeout <secs>        # Socket read timeout (0 = no timeout)
@@ -143,7 +144,9 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8 MiB)
 - `AWS_ENDPOINT_URL` - Custom endpoint URL
 - `AWS_CONFIG_FILE` - Config file location
 - `AWS_SHARED_CREDENTIALS_FILE` - Credentials file location
+- `HSC_DEBUG` - Set to any non-empty value to enable debug output (equivalent to `--debug`)
 - `HSC_RDMA` - RDMA provider: `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- `HSC_RESOLVE` - Comma-separated list of `HOST:PORT:IP` resolve overrides (same format as `--resolve`)
 
 ## Advanced Features
 
@@ -269,6 +272,35 @@ hsc cmp ./myfile.txt s3://my-bucket/myfile.txt
 # Verify a specific byte range
 hsc cmp --range 0-999 ./header.bin s3://bucket/header.bin
 ```
+
+### Resolve / DNS Override
+
+Override the IP address for a specific endpoint hostname without modifying DNS or
+`/etc/hosts`.  The format mirrors curl's `--resolve` flag.
+
+```bash
+# Direct all traffic for s3.example.com (port 443) to a specific node
+hsc --resolve s3.example.com:443:192.168.1.10 \
+    --endpoint-url https://s3.example.com \
+    ls
+
+# Override for HTTP endpoints (port 80)
+hsc --resolve s3.example.com:80:192.168.1.10 \
+    --endpoint-url http://s3.example.com \
+    cp file.txt s3://bucket/
+
+# Multiple overrides (one flag per mapping)
+hsc --resolve node1.example.com:443:10.0.0.1 \
+    --resolve node2.example.com:443:10.0.0.2 \
+    ls
+
+# Via environment variable (comma-separated)
+export HSC_RESOLVE=s3.example.com:443:10.0.0.5
+hsc --endpoint-url https://s3.example.com ls
+```
+
+TLS SNI and the `Host` header always use the original hostname, so servers with
+hostname-based certificates work correctly without `--no-verify-ssl`.
 
 ### RDMA Transfers
 

@@ -60,13 +60,15 @@ hsc rm s3://bucket/logs/ -r           # Delete all with prefix
 --exclude "temp*" --exclude "*.tmp"      # Multiple excludes (OR)
 ```
 
-## Global Options
+### Global Options
+
 ```bash
 --profile production                     # Use specific AWS profile
 --region us-west-2                       # Override region
 --endpoint-url https://s3.example.com    # Use S3-compatible service
 --debug                                  # Enable debug output
 --no-verify-ssl                          # Disable SSL verification
+--resolve s3.example.com:443:10.0.0.5   # Map hostname to IP (repeatable)
 --cli-connect-timeout 10                 # TCP connect timeout in seconds
 --cli-read-timeout 60                    # Socket read timeout in seconds
 -H "x-custom:value"                      # Custom HTTP header (repeatable)
@@ -107,6 +109,7 @@ export AWS_REGION=us-west-2
 export AWS_ENDPOINT_URL=https://s3.example.com
 export AWS_ACCESS_KEY_ID=key
 export AWS_SECRET_ACCESS_KEY=secret
+export HSC_RESOLVE=s3.example.com:443:10.0.0.5  # hostname→IP override(s), comma-separated
 ```
 
 ## Advanced Examples

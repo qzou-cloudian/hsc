@@ -56,6 +56,11 @@ struct Cli {
     #[arg(long, global = true)]
     no_sign_request: bool,
 
+    /// Map endpoint hostname to a specific IP (HOST:PORT:IP, curl-compatible).
+    /// Can be specified multiple times.  Also read from HSC_RESOLVE (comma-separated).
+    #[arg(long, global = true, value_name = "HOST:PORT:IP")]
+    resolve: Vec<String>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -587,6 +592,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map(|v| !v.is_empty())
             .unwrap_or(false);
 
+    // Merge --resolve CLI flags with HSC_RESOLVE env var (comma-separated).
+    let mut resolve = cli.resolve.clone();
+    if let Ok(env_resolve) = std::env::var("HSC_RESOLVE") {
+        for entry in env_resolve.split(',') {
+            let entry = entry.trim();
+            if !entry.is_empty() {
+                resolve.push(entry.to_string());
+            }
+        }
+    }
+
     // Initialize S3 client with global options
     let mut client_config = s3_client::S3ClientConfig {
         endpoint_url: cli.endpoint_url,
@@ -600,6 +616,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connect_timeout_secs: cli.cli_connect_timeout,
         custom_headers: cli.custom_header,
         no_sign_request: cli.no_sign_request,
+        resolve,
         #[cfg(feature = "rdma")]
         rdma_provider: cli.rdma.clone(),
         #[cfg(not(feature = "rdma"))]

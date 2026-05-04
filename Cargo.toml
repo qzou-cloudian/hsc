@@ -1,6 +1,6 @@
 [package]
 name = "hsc"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 authors = ["Qingshan <qzou@cloudian.com>"]
 description = "High-performance S3 CLI tool"
@@ -12,8 +12,8 @@ categories = ["command-line-utilities"]
 [features]
 # Enable RDMA support (interceptor + mock provider)
 rdma = ["dep:s3-rdma"]
-# Enable real RDMA provider plugin (loads libs3rdmaclient.so at runtime)
-plugin = ["rdma", "s3-rdma/plugin-client"]
+# Enable real RDMA provider (loads libs3rdmaclient.so at runtime)
+plugin = ["rdma", "s3-rdma/rdma-client"]
 
 [dependencies]
 aws-config = "1.8.14"
@@ -39,4 +39,5 @@ md-5 = "0.10.6"
 sha-1 = "0.10.1"
 sha2 = "0.10.9"
 tokio = { version = "1.49.0", features = ["full"] }
+tower-service = "0.3"
 walkdir = "2.5.0"

@@ -34,6 +34,20 @@ export AWS_REGION=us-west-2
 export AWS_ENDPOINT_URL=http://minio:9000
 ```
 
+### hsc-Specific Variables
+
+- **HSC_DEBUG**: Set to any non-empty value to enable debug output (same as `--debug`)
+- **HSC_RDMA**: RDMA provider selection — `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- **HSC_RESOLVE**: Comma-separated `HOST:PORT:IP` overrides — maps hostnames to specific IPs
+  without changing DNS (same format as `--resolve`, repeatable via `,`)
+
+Example:
+```bash
+export HSC_DEBUG=1
+export HSC_RDMA=auto
+export HSC_RESOLVE=s3.example.com:443:10.0.0.5,s3.example.com:80:10.0.0.5
+```
+
 ## Configuration Precedence
 
 Settings are applied in the following order (highest to lowest priority):
@@ -183,6 +197,9 @@ Enable debug output to see which settings are being used:
 
 ```bash
 hsc --debug ls
+# Or via environment variable:
+export HSC_DEBUG=1
+hsc ls
 ```
 
 Output example:
@@ -192,6 +209,40 @@ Debug: Using region: us-east-1
 Debug: Using custom endpoint: http://minio:9000
 Debug: S3 client initialized successfully
 ```
+
+## Resolve / DNS Overrides
+
+Override the IP address that a hostname resolves to without changing DNS or
+`/etc/hosts`.  Useful when testing a specific node in a cluster or working around
+DNS propagation delays.
+
+### Via Environment Variable
+
+```bash
+# Single override
+export HSC_RESOLVE=s3.example.com:443:10.0.0.5
+hsc --endpoint-url https://s3.example.com ls
+
+# Multiple overrides (comma-separated)
+export HSC_RESOLVE=node1.example.com:443:10.0.0.1,node2.example.com:443:10.0.0.2
+hsc ls
+```
+
+### Via CLI Flag
+
+```bash
+# Repeatable — specify once per mapping
+hsc --resolve s3.example.com:443:10.0.0.5 \
+    --endpoint-url https://s3.example.com \
+    ls
+```
+
+The format is `HOST:PORT:IP` (curl-compatible).  The port is validated but DNS
+overrides apply to all ports for the given hostname.  TLS SNI and the `Host`
+header always use the original hostname.
+
+CLI flag entries and `HSC_RESOLVE` entries are merged together.
+
 
 ## Temporary Credentials
 

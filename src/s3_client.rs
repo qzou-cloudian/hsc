@@ -7,9 +7,16 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 use aws_smithy_types::timeout::TimeoutConfig;
+use hyper::client::connect::dns::Name;
+use hyper_rustls::ConfigBuilderExt;
+use std::collections::HashMap;
 use std::env;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
+use tower_service::Service;
 
 use crate::debug_interceptor::DebugInterceptor;
 use crate::redirect_interceptor::{RedirectInterceptor, RedirectRetryClassifier};
@@ -115,6 +122,93 @@ impl Intercept for CustomHeadersInterceptor {
     }
 }
 
+/// DNS resolver that directs specific hostnames to fixed IP addresses.
+///
+/// This implements the `--resolve HOST:PORT:IP` / `HSC_RESOLVE` feature.
+/// The port component of the override spec is accepted for curl-compatibility
+/// but is not used at the DNS level; all ports for an overridden hostname
+/// are directed to the same IP.  The original hostname is still presented in
+/// the TLS SNI and `Host` header, so servers with hostname-based certificates
+/// work correctly.
+#[derive(Clone, Debug)]
+struct CustomDnsResolver {
+    overrides: Arc<HashMap<String, IpAddr>>,
+}
+
+impl Service<Name> for CustomDnsResolver {
+    type Response = std::vec::IntoIter<SocketAddr>;
+    type Error = std::io::Error;
+    type Future =
+        Pin<Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, name: Name) -> Self::Future {
+        let host = name.as_str().to_lowercase();
+        if let Some(&ip) = self.overrides.get(&host) {
+            // Return the overridden IP; port 0 is a placeholder — Hyper sets the
+            // real port from the request URI before connecting.
+            Box::pin(std::future::ready(Ok(vec![SocketAddr::new(ip, 0)].into_iter())))
+        } else {
+            // Fall back to system DNS.
+            let host_str = name.as_str().to_owned();
+            Box::pin(async move {
+                let addrs: Vec<SocketAddr> = tokio::net::lookup_host(format!("{}:0", host_str))
+                    .await?
+                    .map(|mut a| {
+                        a.set_port(0);
+                        a
+                    })
+                    .collect();
+                Ok(addrs.into_iter())
+            })
+        }
+    }
+}
+
+/// Parse a single `HOST:PORT:IP` resolve override.
+///
+/// Returns `(hostname, ip_addr)`.  The port is validated (must be 1–65535) but
+/// is not stored — DNS resolution applies to all ports for the given hostname.
+/// IPv6 addresses may be wrapped in brackets (e.g. `[::1]`).
+fn parse_resolve_entry(entry: &str) -> Result<(String, IpAddr), String> {
+    let first = entry.find(':').ok_or_else(|| {
+        format!("invalid --resolve entry '{}': expected HOST:PORT:IP", entry)
+    })?;
+    let second = entry[first + 1..]
+        .find(':')
+        .map(|p| first + 1 + p)
+        .ok_or_else(|| format!("invalid --resolve entry '{}': expected HOST:PORT:IP", entry))?;
+
+    let host = entry[..first].to_lowercase();
+    let port_str = &entry[first + 1..second];
+    let ip_str = &entry[second + 1..];
+
+    if host.is_empty() || port_str.is_empty() || ip_str.is_empty() {
+        return Err(format!(
+            "invalid --resolve entry '{}': parts must not be empty",
+            entry
+        ));
+    }
+    port_str.parse::<u16>().map_err(|_| {
+        format!(
+            "invalid port '{}' in --resolve entry '{}'",
+            port_str, entry
+        )
+    })?;
+    // Strip optional IPv6 brackets: [::1] → ::1
+    let ip_str = ip_str.trim_matches(|c| c == '[' || c == ']');
+    let ip = ip_str.parse::<IpAddr>().map_err(|_| {
+        format!(
+            "invalid IP address '{}' in --resolve entry '{}'",
+            ip_str, entry
+        )
+    })?;
+    Ok((host, ip))
+}
+
 /// Configuration for S3 client creation
 #[derive(Clone)]
 pub struct S3ClientConfig {
@@ -133,7 +227,12 @@ pub struct S3ClientConfig {
     pub custom_headers: Vec<String>,
     /// When `true`, auth headers are stripped so requests are sent unsigned.
     pub no_sign_request: bool,
-    /// Normalized RDMA provider name (`"mock"`, `"cuobj"`), or `None` to disable RDMA.
+    /// Hostname→IP resolve overrides in `HOST:PORT:IP` format (curl-compatible).
+    /// Entries are parsed by [`parse_resolve_entry`]; invalid entries are logged
+    /// as warnings and skipped.
+    pub resolve: Vec<String>,
+    /// Normalized RDMA provider name (`"cuobj"` / `"mock"`), or `None` to disable RDMA.
+    /// Use `"plugin"` or `"cuobj"` interchangeably for the plugin-based provider.
     #[allow(dead_code)]
     pub rdma_provider: Option<String>,
 }
@@ -152,6 +251,7 @@ impl Default for S3ClientConfig {
             connect_timeout_secs: None,
             custom_headers: Vec::new(),
             no_sign_request: false,
+            resolve: Vec::new(),
             rdma_provider: None,
         }
     }
@@ -173,6 +273,8 @@ impl Default for S3ClientConfig {
 ///   `true`/`1` (same as `auto`), `false`/`0` (disable).
 /// - HSC_RDMA_MOCK: Set to `true` or `1` to use mock RDMA provider
 /// - HSC_DEBUG: Set to a non-empty value to enable request/response header logging
+/// - HSC_RESOLVE: Comma-separated list of `HOST:PORT:IP` resolve overrides (same
+///   format as `--resolve`); entries are merged with any `--resolve` CLI flags.
 pub async fn create_s3_client(
     mut config: S3ClientConfig,
 ) -> Result<Client, Box<dyn std::error::Error>> {
@@ -277,21 +379,51 @@ pub async fn create_s3_client(
             .force_path_style(true); // Required for S3-compatible services
     }
 
-    // Disable SSL verification if requested (e.g. self-signed cert testing).
-    if !config.verify_ssl {
-        let tls_cfg = std::sync::Arc::new(
+    // Build a custom HTTP client when --resolve or --no-verify-ssl is active.
+    // A custom connector is required in both cases:
+    //   * --resolve   → custom DNS resolver (hostname→IP override)
+    //   * --no-verify-ssl → custom TLS verifier (accepts any certificate)
+    // The two features are orthogonal and compose cleanly in a single connector.
+    if !config.verify_ssl || !config.resolve.is_empty() {
+        // Build hostname→IP override map from --resolve / HSC_RESOLVE entries.
+        let mut resolve_map: HashMap<String, IpAddr> = HashMap::new();
+        for entry in &config.resolve {
+            match parse_resolve_entry(entry) {
+                Ok((host, ip)) => {
+                    if config.debug {
+                        eprintln!("Debug: resolve override: {} → {}", host, ip);
+                    }
+                    resolve_map.insert(host, ip);
+                }
+                Err(e) => eprintln!("Warning: {}", e),
+            }
+        }
+
+        let resolver = CustomDnsResolver {
+            overrides: Arc::new(resolve_map),
+        };
+        let mut http_conn = hyper::client::HttpConnector::new_with_resolver(resolver);
+        http_conn.enforce_http(false); // allow HTTPS URIs through to the TLS layer
+
+        let tls_cfg = if !config.verify_ssl {
             rustls::ClientConfig::builder()
                 .with_safe_defaults()
                 .with_custom_certificate_verifier(Arc::new(AcceptAnyServerCert))
-                .with_no_client_auth(),
-        );
-        let https: hyper_rustls::HttpsConnector<hyper::client::HttpConnector> =
-            hyper_rustls::HttpsConnectorBuilder::new()
-                .with_tls_config((*tls_cfg).clone())
-                .https_or_http()
-                .enable_http1()
-                .enable_http2()
-                .build();
+                .with_no_client_auth()
+        } else {
+            rustls::ClientConfig::builder()
+                .with_safe_defaults()
+                .with_native_roots()
+                .with_no_client_auth()
+        };
+
+        let https = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_tls_config(tls_cfg)
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .wrap_connector(http_conn);
+
         let smithy_client =
             aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder::new().build(https);
         s3_config_builder = s3_config_builder.http_client(smithy_client);
@@ -334,7 +466,7 @@ pub async fn create_s3_client(
     // and modify_before_signing updates the URI so the retry is correctly re-signed.
     s3_config_builder = s3_config_builder
         .interceptor(RedirectInterceptor::default())
-        .retry_classifier(RedirectRetryClassifier::default());
+        .retry_classifier(RedirectRetryClassifier);
 
     let s3_config = s3_config_builder.build();
 
@@ -352,7 +484,7 @@ pub async fn create_s3_client(
 /// Priority: CLI flag (already on config) > `HSC_RDMA` env > config file > default false.
 ///
 /// The `rdma` key in the config file accepts the same values as `HSC_RDMA`:
-/// `auto`, `cuobj`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
+/// `plugin`, `cuobj`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
 pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
     if config.rdma_provider.is_some() {
         // Normalize the CLI-provided value (e.g. "auto" → "cuobj").
@@ -369,7 +501,7 @@ pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
         .unwrap_or_else(|| "default".to_string());
     let cfg_setting = load_rdma_settings(&profile);
 
-    // HSC_RDMA accepts: mock, cuobj, auto, true, 1, false, 0
+    // HSC_RDMA accepts: plugin, cuobj, auto, mock, true, 1, false, 0
     let env_provider = env::var("HSC_RDMA")
         .ok()
         .and_then(|v| parse_rdma_provider_value(&v));
@@ -511,16 +643,19 @@ fn profile_section_header(profile: &str) -> String {
 
 /// Parse an RDMA provider value into a normalized provider name.
 ///
-/// | Value                         | Result          |
-/// |-------------------------------|-----------------|
-/// | `mock`                        | `Some("mock")`  |
-/// | `cuobj`, `auto`, `true`,      | `Some("cuobj")` |
-/// | `1`, `yes`, `on`              |                 |
-/// | `false`, `0`, `no`, `off`, …  | `None`          |
+/// | Value                              | Result          |
+/// |------------------------------------|-----------------|
+/// | `mock`                             | `Some("mock")`  |
+/// | `plugin`, `cuobj`, `auto`, `true`, | `Some("cuobj")` |
+/// | `1`, `yes`, `on`                   |                 |
+/// | `false`, `0`, `no`, `off`, …       | `None`          |
+///
+/// `plugin` and `cuobj` are aliases for the same provider; `plugin` is the
+/// current preferred spelling (matching the Cargo feature name).
 fn parse_rdma_provider_value(value: &str) -> Option<String> {
     match value.to_lowercase().as_str() {
         "mock" => Some("mock".to_owned()),
-        "cuobj" | "auto" | "true" | "1" | "yes" | "on" => Some("cuobj".to_owned()),
+        "plugin" | "cuobj" | "auto" | "true" | "1" | "yes" | "on" => Some("cuobj".to_owned()),
         _ => None,
     }
 }
