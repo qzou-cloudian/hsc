@@ -326,81 +326,92 @@ pub async fn upload_file(
         // Single PUT — use RDMA when a provider is supplied.
         #[cfg(feature = "rdma")]
         if let Some(ref provider) = rdma {
-            let mut buffer = tokio::fs::read(local_path).await?;
-            let size = buffer.len();
+            let data = tokio::fs::read(local_path).await?;
+            let size = data.len();
             let s3_key = format!("{bucket}/{key}");
-            let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
-                if provider.is_memory_suitable(buffer.as_ptr(), size) {
-                    provider.bind(buffer.as_mut_ptr(), size, s3_key.as_bytes()).ok()
-                } else {
-                    None
-                };
-            let maybe_token: Option<Vec<u8>> = if let Some(ref channel) = maybe_channel {
-                let max_transfer = channel.get_max_transfer_size();
-                if size <= max_transfer {
-                    // Single token — existing behaviour.
-                    match channel.prepare_put_token(0, size) {
-                        Ok(t) => Some(t),
-                        Err(e) => {
-                            if e.is_fallback_eligible() {
-                                eprintln!(
-                                    "[rdma] prepare_put_token failed ({e}); falling back to plain HTTP"
-                                );
-                            } else {
-                                eprintln!("[rdma] prepare_put_token error ({e})");
+            // Provider allocates and registers the buffer; we copy file data into it.
+            let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
+                provider.bind(size, s3_key.as_bytes()).ok().map(|ch| {
+                    let buf = unsafe {
+                        std::slice::from_raw_parts_mut(ch.ptr() as *mut u8, ch.size())
+                    };
+                    buf[..size].copy_from_slice(&data[..size]);
+                    Arc::from(ch)
+                })
+            } else {
+                None
+            };
+            // Prepare RDMA token(s) and collect handles for complete_put.
+            let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaPutHandle>)> =
+                if let Some(ref channel) = maybe_channel {
+                    let max_transfer = channel.get_max_transfer_size();
+                    if size <= max_transfer {
+                        // Single token — existing behaviour.
+                        match channel.prepare_put(0, size) {
+                            Ok(h) => Some((h.token().to_vec(), vec![h])),
+                            Err(e) => {
+                                if e.is_fallback_eligible() {
+                                    eprintln!(
+                                        "[rdma] prepare_put failed ({e}); falling back to plain HTTP"
+                                    );
+                                } else {
+                                    eprintln!("[rdma] prepare_put error ({e})");
+                                }
+                                None
                             }
+                        }
+                    } else {
+                        // Buffer exceeds provider's single-token limit — split into N tokens.
+                        let mut tok_strs = Vec::new();
+                        let mut handles = Vec::new();
+                        let mut off = 0usize;
+                        let mut ok = true;
+                        while off < size {
+                            let n = max_transfer.min(size - off);
+                            match channel.prepare_put(off, n) {
+                                Ok(h) => {
+                                    tok_strs.push(
+                                        String::from_utf8_lossy(h.token()).into_owned(),
+                                    );
+                                    handles.push(h);
+                                    off += n;
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[rdma] prepare_put failed for multi-token \
+                                         (tok={}, {e}); falling back to plain HTTP",
+                                        tok_strs.len()
+                                    );
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        if ok {
+                            Some((tok_strs.join("|").into_bytes(), handles))
+                        } else {
                             None
                         }
                     }
                 } else {
-                    // Buffer exceeds provider's single-token limit — split into N tokens.
-                    // Each token encodes its own size; no separate sizes header needed.
-                    let mut tok_strs = Vec::new();
-                    let mut off = 0usize;
-                    let mut ok = true;
-                    while off < size {
-                        let n = max_transfer.min(size - off);
-                        match channel.prepare_put_token(off, n) {
-                            Ok(tok) => {
-                                tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
-                                off += n;
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[rdma] prepare_put_token failed for multi-token \
-                                     (tok={}, {e}); falling back to plain HTTP",
-                                    tok_strs.len()
-                                );
-                                ok = false;
-                                break;
-                            }
-                        }
-                    }
-                    if ok {
-                        Some(tok_strs.join("|").into_bytes())
-                    } else {
-                        None
-                    }
-                }
-            } else {
-                None
-            };
+                    None
+                };
             // For RDMA transfers the data travels via RDMA, not the HTTP body.
             // Use an empty body so content-length is 0 and x-amz-content-sha256
             // reflects SHA256 of the empty string, as the server expects.
             let rdma_body = ByteStream::from_static(b"");
-            if let Some(token) = maybe_token {
-                let channel_arc: Arc<dyn RdmaClientChannel> =
-                    Arc::from(maybe_channel.unwrap());
+            if let Some((token, handles)) = maybe_rdma {
+                let channel_arc = maybe_channel.unwrap();
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
                 let (cksum_alg, cksum_val) = compute_put_checksum(
-                    &buffer,
+                    &data,
                     checksum_mode.as_ref(),
                     checksum_algorithm.as_ref(),
                 );
                 let interceptor = RdmaInterceptor::new_put(
                     channel_arc,
                     token,
+                    handles,
                     size,
                     rdma_confirmed,
                     false,
@@ -425,7 +436,7 @@ pub async fn upload_file(
                     .send()
                     .await?;
             }
-            // maybe_channel is dropped here (or was consumed above), deregistering memory.
+            // maybe_channel dropped here (or consumed above) → deregisters memory.
             println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
             return Ok(());
         }
@@ -531,88 +542,26 @@ async fn upload_file_multipart(
     let mut part_number = 1;
     let mut uploaded_bytes = 0u64;
 
-    // RDMA: allocate the part buffer once before the loop so the same memory
-    // region (at a stable virtual address) is reused for every part.
-    // Allocating a fresh Vec each iteration risks later parts landing in pages
-    // outside the CUDA-accessible region on cuobj hardware, causing
-    // prepare_put_token to fail silently and losing the RDMA token.
-    //
-    // bind() is called per-part because providers such as MockRdmaProvider create
-    // one SHM entry per binding: after process_rdma_reply confirms a part the
-    // entry is removed, so the buffer must be re-bound before the next token
-    // generation.  For cuobj both bind/drop are lightweight (real registration
-    // happens inside prepare_put_token), so the extra calls cost nothing.
-    #[cfg(feature = "rdma")]
-    let (mut rdma_buffer, rdma_memory_ok) = if let Some(ref provider) = rdma {
-        let buf = vec![0u8; chunk_size as usize];
-        let ok = provider.is_memory_suitable(buf.as_ptr(), chunk_size as usize);
-        (buf, ok)
-    } else {
-        (Vec::new(), false)
-    };
-
     loop {
         let bytes_read;
 
-        #[cfg(feature = "rdma")]
-        let part_data: Option<Vec<u8>>; // Some(_) only for the non-RDMA HTTP path
-
-        // Read the next chunk into the pre-allocated RDMA buffer (RDMA path)
-        // or a fresh allocation (plain HTTP path).
-        #[cfg(feature = "rdma")]
-        {
-            if rdma.is_some() {
-                let mut n_read = 0usize;
-                while n_read < chunk_size as usize {
-                    let n = file.read(&mut rdma_buffer[n_read..]).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    n_read += n;
-                }
-                if n_read == 0 {
-                    break;
-                }
-                bytes_read = n_read;
-                part_data = None;
-            } else {
-                let mut buffer = vec![0u8; chunk_size as usize];
-                let mut n_read = 0usize;
-                while n_read < chunk_size as usize {
-                    let n = file.read(&mut buffer[n_read..]).await?;
-                    if n == 0 {
-                        break;
-                    }
-                    n_read += n;
-                }
-                if n_read == 0 {
-                    break;
-                }
-                buffer.truncate(n_read);
-                bytes_read = n_read;
-                part_data = Some(buffer);
-            }
-        }
-        #[cfg(not(feature = "rdma"))]
-        let buffer;
-        #[cfg(not(feature = "rdma"))]
-        {
-            let mut buf = vec![0u8; chunk_size as usize];
-            let mut n_read = 0usize;
-            while n_read < chunk_size as usize {
-                let n = file.read(&mut buf[n_read..]).await?;
-                if n == 0 {
-                    break;
-                }
-                n_read += n;
-            }
-            if n_read == 0 {
+        // Read the next chunk.  Both RDMA and plain-HTTP paths read into a
+        // local Vec first; the RDMA path then copies into the provider-owned
+        // channel buffer via channel.ptr().
+        let mut chunk_buf = vec![0u8; chunk_size as usize];
+        let mut n_read = 0usize;
+        while n_read < chunk_size as usize {
+            let n = file.read(&mut chunk_buf[n_read..]).await?;
+            if n == 0 {
                 break;
             }
-            buf.truncate(n_read);
-            bytes_read = n_read;
-            buffer = buf;
+            n_read += n;
         }
+        if n_read == 0 {
+            break;
+        }
+        chunk_buf.truncate(n_read);
+        bytes_read = n_read;
 
         // Upload this part — with RDMA interceptor when a provider is present.
         // part_cksum_val holds the locally computed checksum for CompleteMultipartUpload:
@@ -622,30 +571,34 @@ async fn upload_file_multipart(
         #[cfg(feature = "rdma")]
         let upload_part_response = {
             if let Some(ref provider) = rdma {
-                // Bind the buffer for this part.  This creates the SHM entry the
-                // mock provider needs for each transfer, or is lightweight for cuobj.
-                // Dropping the channel at end of scope deregisters the memory.
-                let maybe_channel: Option<Box<dyn RdmaClientChannel>> = if rdma_memory_ok {
-                    let s3_key = format!("{bucket}/{key}");
-                    provider
-                        .bind(rdma_buffer.as_mut_ptr(), bytes_read, s3_key.as_bytes())
-                        .ok()
-                } else {
-                    None
-                };
+                let s3_key = format!("{bucket}/{key}");
+                // Provider allocates and registers the buffer; we copy the chunk into it.
+                // bind() is called per-part because the mock provider tracks one SHM
+                // entry per binding; dropping the channel at end of scope deregisters.
+                let maybe_channel: Option<Arc<dyn RdmaClientChannel>> =
+                    provider.bind(bytes_read, s3_key.as_bytes()).ok().map(|ch| {
+                        let buf = unsafe {
+                            std::slice::from_raw_parts_mut(ch.ptr() as *mut u8, ch.size())
+                        };
+                        buf[..bytes_read].copy_from_slice(&chunk_buf[..bytes_read]);
+                        Arc::from(ch)
+                    });
 
-                let maybe_token = if let Some(ref channel) = maybe_channel {
-                    channel.prepare_put_token(0, bytes_read).ok()
-                } else {
-                    None
-                };
+                let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaPutHandle>)> =
+                    if let Some(ref channel) = maybe_channel {
+                        channel.prepare_put(0, bytes_read).ok().map(|h| {
+                            let token = h.token().to_vec();
+                            (token, vec![h])
+                        })
+                    } else {
+                        None
+                    };
 
-                let resp = if let Some(token) = maybe_token {
-                    let channel_arc: Arc<dyn RdmaClientChannel> =
-                        Arc::from(maybe_channel.unwrap());
+                let resp = if let Some((token, handles)) = maybe_rdma {
+                    let channel_arc = maybe_channel.unwrap();
                     let rdma_confirmed = Arc::new(AtomicBool::new(false));
                     let (cksum_alg, cksum_val) = compute_put_checksum(
-                        &rdma_buffer[..bytes_read],
+                        &chunk_buf[..bytes_read],
                         checksum_mode.as_ref(),
                         checksum_algorithm.as_ref(),
                     );
@@ -653,6 +606,7 @@ async fn upload_file_multipart(
                     let interceptor = RdmaInterceptor::new_put(
                         channel_arc,
                         token,
+                        handles,
                         bytes_read,
                         rdma_confirmed,
                         false,
@@ -671,12 +625,11 @@ async fn upload_file_multipart(
                         .send()
                         .await?
                 } else {
-                    // RDMA token unavailable — fall back to plain HTTP body.
-                    // maybe_channel is dropped here, deregistering if it was bound.
-                    let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
+                    // RDMA bind or prepare_put unavailable — fall back to plain HTTP body.
+                    // maybe_channel dropped here → deregisters if it was bound.
                     let (resp, cksum) = upload_part_http(
                         client,
-                        body,
+                        chunk_buf,
                         bucket,
                         key,
                         upload_id,
@@ -692,11 +645,9 @@ async fn upload_file_multipart(
                 // maybe_channel Arc dropped here (or already consumed above) → deregisters.
                 resp
             } else {
-                let body_data: Vec<u8> =
-                    part_data.ok_or("Internal error: part buffer missing on non-RDMA path")?;
                 let (resp, cksum) = upload_part_http(
                     client,
-                    body_data,
+                    chunk_buf,
                     bucket,
                     key,
                     upload_id,
@@ -714,7 +665,7 @@ async fn upload_file_multipart(
         let upload_part_response = {
             let (resp, cksum) = upload_part_http(
                 client,
-                buffer,
+                chunk_buf,
                 bucket,
                 key,
                 upload_id,
@@ -839,48 +790,54 @@ pub async fn download_file(
     if let Some(ref provider) = rdma {
         let head = client.head_object().bucket(bucket).key(key).send().await?;
         let size = head.content_length().unwrap_or(0).max(0) as usize;
-        let mut buffer: Vec<u8> = vec![0u8; size];
         let s3_key = format!("{bucket}/{key}");
-        let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
-            if size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size) {
-                provider.bind(buffer.as_mut_ptr(), size, s3_key.as_bytes()).ok()
-            } else {
-                None
-            };
-        let maybe_token: Option<Vec<u8>> = if let Some(ref channel) = maybe_channel {
-            let max_transfer = channel.get_max_transfer_size();
-            if size <= max_transfer {
-                // Single token — existing behaviour.
-                channel.prepare_get_token(0, size).ok()
-            } else {
-                // Buffer exceeds provider's single-token limit — split into N tokens.
-                // Each token encodes its own size; no separate sizes header needed.
-                let mut tok_strs = Vec::new();
-                let mut off = 0usize;
-                let mut ok = true;
-                while off < size {
-                    let n = max_transfer.min(size - off);
-                    match channel.prepare_get_token(off, n) {
-                        Ok(tok) => {
-                            tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
-                            off += n;
-                        }
-                        Err(_) => {
-                            ok = false;
-                            break;
-                        }
-                    }
-                }
-                if ok {
-                    Some(tok_strs.join("|").into_bytes())
-                } else {
-                    None
-                }
-            }
+        // Provider allocates and registers the buffer.
+        let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
+            provider.bind(size, s3_key.as_bytes()).ok().map(Arc::from)
         } else {
             None
         };
-        let rdma_attempted = maybe_token.is_some();
+        let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaGetHandle>)> =
+            if let Some(ref channel) = maybe_channel {
+                let max_transfer = channel.get_max_transfer_size();
+                if size <= max_transfer {
+                    // Single token — existing behaviour.
+                    channel.prepare_get(0, size).ok().map(|h| {
+                        let token = h.token().to_vec();
+                        (token, vec![h])
+                    })
+                } else {
+                    // Buffer exceeds provider's single-token limit — split into N tokens.
+                    let mut tok_strs = Vec::new();
+                    let mut handles = Vec::new();
+                    let mut off = 0usize;
+                    let mut ok = true;
+                    while off < size {
+                        let n = max_transfer.min(size - off);
+                        match channel.prepare_get(off, n) {
+                            Ok(h) => {
+                                tok_strs.push(
+                                    String::from_utf8_lossy(h.token()).into_owned(),
+                                );
+                                handles.push(h);
+                                off += n;
+                            }
+                            Err(_) => {
+                                ok = false;
+                                break;
+                            }
+                        }
+                    }
+                    if ok {
+                        Some((tok_strs.join("|").into_bytes(), handles))
+                    } else {
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+        let rdma_attempted = maybe_rdma.is_some();
         let mut request = client.get_object().bucket(bucket).key(key);
         if let Some(mode) = checksum_mode {
             request = request.checksum_mode(mode);
@@ -896,11 +853,12 @@ pub async fn download_file(
             }
         }
         let rdma_confirmed = Arc::new(AtomicBool::new(false));
-        let response = if let Some(token) = maybe_token {
-            let channel_arc: Arc<dyn RdmaClientChannel> = Arc::from(maybe_channel.unwrap());
+        let response = if let Some((token, handles)) = maybe_rdma {
+            let channel_arc = maybe_channel.as_ref().unwrap().clone();
             let interceptor = RdmaInterceptor::new_get(
                 channel_arc,
                 token,
+                handles,
                 size,
                 Arc::clone(&rdma_confirmed),
                 false,
@@ -911,14 +869,21 @@ pub async fn download_file(
         };
         let mut file = fs::File::create(local_path).await?;
         if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
-            file.write_all(&buffer[..size]).await?;
+            // Data was written into the channel buffer by complete_get.
+            let buf = unsafe {
+                std::slice::from_raw_parts(
+                    maybe_channel.as_ref().unwrap().ptr(),
+                    maybe_channel.as_ref().unwrap().size(),
+                )
+            };
+            file.write_all(&buf[..size]).await?;
         } else {
             let mut body = response.body;
             while let Some(chunk) = body.try_next().await? {
                 file.write_all(&chunk).await?;
             }
         }
-        // maybe_channel dropped here (or consumed above) → deregisters memory.
+        // maybe_channel dropped here → deregisters memory.
         println!("Downloaded: s3://{bucket}/{key} -> {local_path}");
         return Ok(());
     }

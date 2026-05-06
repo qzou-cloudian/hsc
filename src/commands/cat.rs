@@ -148,20 +148,23 @@ async fn cat_s3_object(
         };
 
         if let Some(size) = byte_count {
-            let mut buffer: Vec<u8> = vec![0u8; size];
             let s3_key = format!("{bucket}/{key}");
-            let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
-                if size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size) {
-                    provider.bind(buffer.as_mut_ptr(), size, s3_key.as_bytes()).ok()
-                } else {
-                    None
-                };
-            let maybe_token = if let Some(ref channel) = maybe_channel {
-                channel.prepare_get_token(0, size).ok()
+            // Provider allocates and registers the buffer.
+            let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
+                provider.bind(size, s3_key.as_bytes()).ok().map(Arc::from)
             } else {
                 None
             };
-            let rdma_attempted = maybe_token.is_some();
+            let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaGetHandle>)> =
+                if let Some(ref channel) = maybe_channel {
+                    channel.prepare_get(0, size).ok().map(|h| {
+                        let token = h.token().to_vec();
+                        (token, vec![h])
+                    })
+                } else {
+                    None
+                };
+            let rdma_attempted = maybe_rdma.is_some();
             let mut request = client.get_object().bucket(bucket).key(key);
             if let Some(ref r) = range_hdr {
                 request = request.range(r.clone());
@@ -173,11 +176,12 @@ async fn cat_s3_object(
                 request = request.version_id(v.clone());
             }
             let rdma_confirmed = Arc::new(AtomicBool::new(false));
-            let response = if let Some(token) = maybe_token {
-                let channel_arc: Arc<dyn RdmaClientChannel> = Arc::from(maybe_channel.unwrap());
+            let response = if let Some((token, handles)) = maybe_rdma {
+                let channel_arc = maybe_channel.as_ref().unwrap().clone();
                 let interceptor = RdmaInterceptor::new_get(
                     channel_arc,
                     token,
+                    handles,
                     size,
                     Arc::clone(&rdma_confirmed),
                     false,
@@ -188,14 +192,21 @@ async fn cat_s3_object(
             };
             let mut stdout = io::stdout();
             if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
-                stdout.write_all(&buffer[..size]).await?;
+                // Data was written into the channel buffer by complete_get.
+                let buf = unsafe {
+                    std::slice::from_raw_parts(
+                        maybe_channel.as_ref().unwrap().ptr(),
+                        maybe_channel.as_ref().unwrap().size(),
+                    )
+                };
+                stdout.write_all(&buf[..size]).await?;
             } else {
                 let mut body = response.body;
                 while let Some(bytes) = body.try_next().await? {
                     stdout.write_all(&bytes).await?;
                 }
             }
-            // maybe_channel dropped here (or consumed above) → deregisters memory.
+            // maybe_channel dropped here → deregisters memory.
             stdout.flush().await?;
             return Ok(());
         }

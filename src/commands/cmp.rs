@@ -400,31 +400,34 @@ async fn open_reader(
 
             #[cfg(feature = "rdma")]
             if let Some(ref provider) = rdma {
-                let mut buffer: Vec<u8> = vec![0u8; byte_count];
                 let s3_key = format!("{}/{}", bucket, key);
-                let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
-                    if byte_count > 0 && provider.is_memory_suitable(buffer.as_ptr(), byte_count) {
-                        provider.bind(buffer.as_mut_ptr(), byte_count, s3_key.as_bytes()).ok()
-                    } else {
-                        None
-                    };
-                let maybe_token = if let Some(ref channel) = maybe_channel {
-                    channel.prepare_get_token(0, byte_count).ok()
+                // Provider allocates and registers the buffer.
+                let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if byte_count > 0 {
+                    provider.bind(byte_count, s3_key.as_bytes()).ok().map(Arc::from)
                 } else {
                     None
                 };
-                let rdma_attempted = maybe_token.is_some();
+                let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaGetHandle>)> =
+                    if let Some(ref channel) = maybe_channel {
+                        channel.prepare_get(0, byte_count).ok().map(|h| {
+                            let token = h.token().to_vec();
+                            (token, vec![h])
+                        })
+                    } else {
+                        None
+                    };
+                let rdma_attempted = maybe_rdma.is_some();
                 let mut req = client.get_object().bucket(&bucket).key(&key);
                 if let Some(ref r) = range_hdr {
                     req = req.range(r.clone());
                 }
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
-                let resp = if let Some(token) = maybe_token {
-                    let channel_arc: Arc<dyn RdmaClientChannel> =
-                        Arc::from(maybe_channel.unwrap());
+                let resp = if let Some((token, handles)) = maybe_rdma {
+                    let channel_arc = maybe_channel.as_ref().unwrap().clone();
                     let interceptor = RdmaInterceptor::new_get(
                         channel_arc,
                         token,
+                        handles,
                         byte_count,
                         Arc::clone(&rdma_confirmed),
                         false,
@@ -434,11 +437,18 @@ async fn open_reader(
                     req.send().await?
                 };
                 let bytes = if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
-                    buffer
+                    // Data was written into the channel buffer by complete_get.
+                    let buf = unsafe {
+                        std::slice::from_raw_parts(
+                            maybe_channel.as_ref().unwrap().ptr(),
+                            maybe_channel.as_ref().unwrap().size(),
+                        )
+                    };
+                    buf[..byte_count].to_vec()
                 } else {
                     resp.body.collect().await?.into_bytes().to_vec()
                 };
-                // maybe_channel dropped here (or consumed above) → deregisters memory.
+                // maybe_channel dropped here → deregisters memory.
                 return Ok(Reader {
                     inner: ReaderInner::S3 {
                         data: bytes,

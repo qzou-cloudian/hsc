@@ -23,7 +23,7 @@
 
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use aws_smithy_runtime_api::box_error::BoxError;
@@ -35,8 +35,17 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 
-use s3_rdma::RdmaClientChannel;
+use s3_rdma::{RdmaClientChannel, RdmaPutHandle, RdmaGetHandle};
 use s3_rdma::provider::{RDMA_BYTES_HEADER, RDMA_REPLY_HEADER, RDMA_TOKEN_HEADER};
+
+// ── RdmaHandles ──────────────────────────────────────────────────────────────
+
+/// Holds the typed RDMA handles for an in-flight operation so
+/// `complete_put` / `complete_get` can be called in `read_after_transmit`.
+enum RdmaHandles {
+    Put(Vec<RdmaPutHandle>),
+    Get(Vec<RdmaGetHandle>),
+}
 
 // ── RdmaInterceptor ──────────────────────────────────────────────────────────
 
@@ -59,8 +68,12 @@ const CHECKSUM_HEADERS: &[&str] = &[
 ///    `rdma_confirmed` so the caller knows to use the pre-filled RDMA buffer.
 pub struct RdmaInterceptor {
     channel: Arc<dyn RdmaClientChannel>,
-    /// Pre-generated RDMA descriptor token (may be `|`-separated for multi-token).
+    /// Pre-joined token bytes for the `x-amz-rdma-token` HTTP header.
     token: Vec<u8>,
+    /// Typed operation handles used to call `complete_put` / `complete_get`
+    /// in `read_after_transmit`.  Wrapped in `Mutex<Option<…>>` because
+    /// `Intercept` methods take `&self`.
+    handles: Mutex<Option<RdmaHandles>>,
     /// Byte count for the transfer (fallback for `x-amz-rdma-bytes` when absent).
     size: usize,
     /// Set to `true` by the interceptor when the server confirms RDMA.
@@ -85,6 +98,11 @@ impl std::fmt::Debug for RdmaInterceptor {
 impl RdmaInterceptor {
     /// Create an interceptor for a PUT (upload) request.
     ///
+    /// `token` is the pre-joined `x-amz-rdma-token` value (may be
+    /// `|`-separated for multi-token transfers).  `handles` are the
+    /// [`RdmaPutHandle`]s returned by [`RdmaClientChannel::prepare_put`];
+    /// they are consumed in `read_after_transmit` to call `complete_put`.
+    ///
     /// `checksum_algorithm` and `checksum_value` are injected as
     /// `x-amz-sdk-checksum-algorithm` and `x-amz-checksum-<alg>` headers.
     /// Both must be `Some` or both `None`; passing one without the other is
@@ -92,6 +110,7 @@ impl RdmaInterceptor {
     pub fn new_put(
         channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
+        handles: Vec<RdmaPutHandle>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
@@ -101,6 +120,7 @@ impl RdmaInterceptor {
         Self {
             channel,
             token,
+            handles: Mutex::new(Some(RdmaHandles::Put(handles))),
             size,
             rdma_confirmed,
             debug,
@@ -110,9 +130,14 @@ impl RdmaInterceptor {
     }
 
     /// Create an interceptor for a GET (download) request.
+    ///
+    /// `token` is the pre-joined `x-amz-rdma-token` value.  `handles` are the
+    /// [`RdmaGetHandle`]s returned by [`RdmaClientChannel::prepare_get`];
+    /// they are consumed in `read_after_transmit` to call `complete_get`.
     pub fn new_get(
         channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
+        handles: Vec<RdmaGetHandle>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
@@ -120,6 +145,7 @@ impl RdmaInterceptor {
         Self {
             channel,
             token,
+            handles: Mutex::new(Some(RdmaHandles::Get(handles))),
             size,
             rdma_confirmed,
             debug,
@@ -223,23 +249,35 @@ impl Intercept for RdmaInterceptor {
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(self.size);
 
-            let channel = Arc::clone(&self.channel);
-            let request_token = self.token.clone();
-            let debug = self.debug;
-            channel
-                .process_rdma_reply(
-                    rdma_status,
-                    &request_token,
-                    transferred,
-                    Box::new(move |result| {
-                        if result.error_code != 0 {
-                            eprintln!("[RdmaInterceptor] RDMA error (code={})", result.error_code);
-                        } else if debug {
-                            eprintln!("[RdmaInterceptor] RDMA transfer completed");
+            // Take the handles out of the Mutex (they are consumed by complete_put/complete_get).
+            let handles = self.handles.lock().unwrap().take();
+            match handles {
+                Some(RdmaHandles::Put(put_handles)) => {
+                    for h in put_handles {
+                        if let Err(e) = self.channel.complete_put(h, rdma_status, transferred) {
+                            if self.debug {
+                                eprintln!("[RdmaInterceptor] complete_put error: {e}");
+                            }
                         }
-                    }),
-                )
-                .map_err(|e| Box::new(e) as BoxError)?;
+                    }
+                    if self.debug {
+                        eprintln!("[RdmaInterceptor] RDMA PUT transfer completed");
+                    }
+                }
+                Some(RdmaHandles::Get(get_handles)) => {
+                    for h in get_handles {
+                        if let Err(e) = self.channel.complete_get(h, rdma_status, transferred) {
+                            if self.debug {
+                                eprintln!("[RdmaInterceptor] complete_get error: {e}");
+                            }
+                        }
+                    }
+                    if self.debug {
+                        eprintln!("[RdmaInterceptor] RDMA GET transfer completed");
+                    }
+                }
+                None => {}
+            }
         }
         Ok(())
     }

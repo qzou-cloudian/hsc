@@ -640,18 +640,20 @@ fn profile_section_header(profile: &str) -> String {
 
 /// Parse an RDMA provider value into a normalized provider name.
 ///
-/// | Value                           | Result          |
-/// |---------------------------------|-----------------|
-/// | `mock`                          | `Some("mock")`  |
-/// | `rdma`                          | `Some("rdma")`  |
-/// | `auto`, `true`, `1`, `yes`, `on`| `Some("auto")`  |
-/// | `false`, `0`, `no`, `off`, …    | `None`          |
+/// | Value                           | Result           |
+/// |---------------------------------|------------------|
+/// | `mock`                          | `Some("mock")`   |
+/// | `rdma`, `cuobj`                 | `Some("cuobj")`  |
+/// | `auto`, `true`, `1`, `yes`, `on`| `Some("auto")`   |
+/// | `false`, `0`, `no`, `off`, …    | `None`           |
 ///
 /// The returned string is passed directly to `s3_rdma::create_client_provider`.
+/// `"rdma"` is accepted as a legacy alias for `"cuobj"`.
 fn parse_rdma_provider_value(value: &str) -> Option<String> {
     match value.to_lowercase().as_str() {
         "mock" => Some("mock".to_owned()),
-        "rdma" => Some("rdma".to_owned()),
+        // "rdma" was the old provider name before it was renamed to "cuobj".
+        "rdma" | "cuobj" => Some("cuobj".to_owned()),
         "auto" | "true" | "1" | "yes" | "on" => Some("auto".to_owned()),
         _ => None,
     }
