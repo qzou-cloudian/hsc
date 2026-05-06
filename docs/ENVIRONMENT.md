@@ -7,7 +7,7 @@ This document describes how hsc uses AWS environment variables and configuration
 ### AWS Credentials
 
 - **AWS_ACCESS_KEY_ID**: Your AWS access key ID
-- **AWS_SECRET_ACCESS_KEY**: Your AWS secret access key  
+- **AWS_SECRET_ACCESS_KEY**: Your AWS secret access key
 - **AWS_SESSION_TOKEN**: Session token for temporary credentials (optional)
 
 Example:
@@ -37,7 +37,7 @@ export AWS_ENDPOINT_URL=http://minio:9000
 ### hsc-Specific Variables
 
 - **HSC_DEBUG**: Set to any non-empty value to enable debug output (same as `--debug`)
-- **HSC_RDMA**: RDMA provider selection — `rdma`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- **HSC_RDMA**: RDMA provider selection — `cuobj`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
 - **HSC_RESOLVE**: Comma-separated `HOST:PORT:IP` overrides — maps hostnames to specific IPs
   without changing DNS (same format as `--resolve`, repeatable via `,`)
 

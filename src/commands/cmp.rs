@@ -8,7 +8,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaClientProvider};
+use crate::rdma::{RdmaInterceptor, RdmaClientProvider, RdmaClientChannel};
 #[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -401,17 +401,15 @@ async fn open_reader(
             #[cfg(feature = "rdma")]
             if let Some(ref provider) = rdma {
                 let mut buffer: Vec<u8> = vec![0u8; byte_count];
-                let raw_ptr = buffer.as_mut_ptr();
-                let suitable =
-                    byte_count > 0 && provider.is_memory_suitable(buffer.as_ptr(), byte_count);
-                if suitable {
-                    let _ = provider.register_memory(buffer.as_mut_ptr(), byte_count);
-                }
-                let maybe_token = if suitable {
-                    let s3_key = format!("{}/{}", bucket, key);
-                    provider
-                        .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), byte_count, 0)
-                        .ok()
+                let s3_key = format!("{}/{}", bucket, key);
+                let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
+                    if byte_count > 0 && provider.is_memory_suitable(buffer.as_ptr(), byte_count) {
+                        provider.bind(buffer.as_mut_ptr(), byte_count, s3_key.as_bytes()).ok()
+                    } else {
+                        None
+                    };
+                let maybe_token = if let Some(ref channel) = maybe_channel {
+                    channel.prepare_get_token(0, byte_count).ok()
                 } else {
                     None
                 };
@@ -422,8 +420,10 @@ async fn open_reader(
                 }
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
                 let resp = if let Some(token) = maybe_token {
+                    let channel_arc: Arc<dyn RdmaClientChannel> =
+                        Arc::from(maybe_channel.unwrap());
                     let interceptor = RdmaInterceptor::new_get(
-                        Arc::clone(provider),
+                        channel_arc,
                         token,
                         byte_count,
                         Arc::clone(&rdma_confirmed),
@@ -438,9 +438,7 @@ async fn open_reader(
                 } else {
                     resp.body.collect().await?.into_bytes().to_vec()
                 };
-                if suitable {
-                    let _ = provider.deregister_memory(raw_ptr);
-                }
+                // maybe_channel dropped here (or consumed above) → deregisters memory.
                 return Ok(Reader {
                     inner: ReaderInner::S3 {
                         data: bytes,

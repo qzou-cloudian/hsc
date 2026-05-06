@@ -44,9 +44,8 @@ All notable changes to hsc will be documented in this file.
   - `--duration-secs` → `--duration` (now accepts `30s` / `5m` suffixes in
     addition to plain seconds; e.g. `--duration 2m`)
 
-- **RDMA provider names**: `cuobj` and `plugin` are no longer valid provider
-  names.  The accepted values for `--rdma`, `HSC_RDMA`, and the `rdma`
-  config-file key are now: `rdma` (real plugin), `mock`, `auto`,
+- **RDMA provider names**: The accepted values for `--rdma`, `HSC_RDMA`, and
+  the `rdma` config-file key are now: `cuobj` (real plugin), `mock`, `auto`,
   `true`/`1`/`yes`/`on` (same as `auto`), `false`/`0`/`no`/`off` (disable).
 
 - **`cuobj` Cargo feature removed**: `--features cuobj` no longer exists; use

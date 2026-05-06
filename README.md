@@ -145,7 +145,7 @@ Supported formats: Plain bytes, MB, M, KB, K, GB, G (default: 8 MiB)
 - `AWS_CONFIG_FILE` - Config file location
 - `AWS_SHARED_CREDENTIALS_FILE` - Credentials file location
 - `HSC_DEBUG` - Set to any non-empty value to enable debug output (equivalent to `--debug`)
-- `HSC_RDMA` - RDMA provider: `rdma`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
+- `HSC_RDMA` - RDMA provider: `cuobj`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable)
 - `HSC_RESOLVE` - Comma-separated list of `HOST:PORT:IP` resolve overrides (same format as `--resolve`)
 
 ## Advanced Features

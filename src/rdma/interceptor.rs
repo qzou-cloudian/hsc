@@ -8,12 +8,14 @@
 //!
 //! ```rust,ignore
 //! use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-//! use crate::{MockRdmaProvider, RdmaClientProvider, RdmaInterceptor};
+//! use crate::{MockRdmaProvider, RdmaClientProvider, RdmaClientChannel, RdmaInterceptor};
 //!
 //! let provider: Arc<dyn RdmaClientProvider> = Arc::new(MockRdmaProvider::new(false, "/dev/shm".into(), 0));
 //! let confirmed = Arc::new(AtomicBool::new(false));
-//! // … register buffer and generate token …
-//! let interceptor = RdmaInterceptor::new_get(Arc::clone(&provider), token, size, Arc::clone(&confirmed), debug);
+//! // Bind buffer to create a channel, then generate a token from it.
+//! let channel: Arc<dyn RdmaClientChannel> = Arc::from(provider.bind(buf.as_mut_ptr(), size, key.as_bytes())?);
+//! let token = channel.prepare_get_token(0, size)?;
+//! let interceptor = RdmaInterceptor::new_get(Arc::clone(&channel), token, size, Arc::clone(&confirmed), debug);
 //!
 //! let resp = client.get_object()...customize().interceptor(interceptor).send().await?;
 //! if confirmed.load(Ordering::Acquire) { /* use RDMA buffer */ }
@@ -33,7 +35,8 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 
-use s3_rdma::RdmaClientProvider;
+use s3_rdma::RdmaClientChannel;
+use s3_rdma::provider::{RDMA_BYTES_HEADER, RDMA_REPLY_HEADER, RDMA_TOKEN_HEADER};
 
 // ── RdmaInterceptor ──────────────────────────────────────────────────────────
 
@@ -55,7 +58,7 @@ const CHECKSUM_HEADERS: &[&str] = &[
 ///    so the SDK does not validate the empty HTTP body, and sets
 ///    `rdma_confirmed` so the caller knows to use the pre-filled RDMA buffer.
 pub struct RdmaInterceptor {
-    provider: Arc<dyn RdmaClientProvider>,
+    channel: Arc<dyn RdmaClientChannel>,
     /// Pre-generated RDMA descriptor token (may be `|`-separated for multi-token).
     token: Vec<u8>,
     /// Byte count for the transfer (fallback for `x-amz-rdma-bytes` when absent).
@@ -72,7 +75,6 @@ pub struct RdmaInterceptor {
 impl std::fmt::Debug for RdmaInterceptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RdmaInterceptor")
-            .field("provider", &self.provider.name())
             .field("token_len", &self.token.len())
             .field("size", &self.size)
             .field("debug", &self.debug)
@@ -88,7 +90,7 @@ impl RdmaInterceptor {
     /// Both must be `Some` or both `None`; passing one without the other is
     /// silently ignored.
     pub fn new_put(
-        provider: Arc<dyn RdmaClientProvider>,
+        channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
@@ -97,7 +99,7 @@ impl RdmaInterceptor {
         checksum_value: Option<String>,
     ) -> Self {
         Self {
-            provider,
+            channel,
             token,
             size,
             rdma_confirmed,
@@ -109,14 +111,14 @@ impl RdmaInterceptor {
 
     /// Create an interceptor for a GET (download) request.
     pub fn new_get(
-        provider: Arc<dyn RdmaClientProvider>,
+        channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
     ) -> Self {
         Self {
-            provider,
+            channel,
             token,
             size,
             rdma_confirmed,
@@ -178,19 +180,18 @@ impl Intercept for RdmaInterceptor {
         _runtime_components: &RuntimeComponents,
         _cfg: &mut ConfigBag,
     ) -> Result<(), BoxError> {
-        let header_name =
-            String::from_utf8_lossy(self.provider.rdma_token_header_name()).into_owned();
         let token_value = String::from_utf8_lossy(&self.token).into_owned();
 
         if self.debug {
             eprintln!(
-                "[RdmaInterceptor] injecting '{header_name}' ({} bytes): '{token_value}'",
+                "[RdmaInterceptor] injecting '{}' ({} bytes): '{token_value}'",
+                RDMA_TOKEN_HEADER,
                 self.token.len()
             );
         }
 
         let headers = context.request_mut().headers_mut();
-        headers.insert(header_name, token_value);
+        headers.insert(RDMA_TOKEN_HEADER, token_value);
 
         Ok(())
     }
@@ -202,10 +203,7 @@ impl Intercept for RdmaInterceptor {
         _runtime_components: &RuntimeComponents,
         _cfg: &mut ConfigBag,
     ) -> Result<(), BoxError> {
-        let reply_header =
-            String::from_utf8_lossy(self.provider.rdma_reply_header_name()).into_owned();
-
-        if let Some(reply_header_value) = context.response().headers().get(&reply_header) {
+        if let Some(reply_header_value) = context.response().headers().get(RDMA_REPLY_HEADER) {
             if self.debug {
                 eprintln!(
                     "[RdmaInterceptor] RDMA reply received: '{}'",
@@ -218,19 +216,17 @@ impl Intercept for RdmaInterceptor {
             let rdma_status: u16 = reply_header_value.trim().parse().unwrap_or(0);
 
             // Read the byte-count header (x-amz-rdma-bytes) if present.
-            let bytes_header =
-                String::from_utf8_lossy(self.provider.rdma_bytes_header_name()).into_owned();
             let transferred: usize = context
                 .response()
                 .headers()
-                .get(&bytes_header)
+                .get(RDMA_BYTES_HEADER)
                 .and_then(|v| v.trim().parse().ok())
                 .unwrap_or(self.size);
 
-            let provider = Arc::clone(&self.provider);
+            let channel = Arc::clone(&self.channel);
             let request_token = self.token.clone();
             let debug = self.debug;
-            provider
+            channel
                 .process_rdma_reply(
                     rdma_status,
                     &request_token,

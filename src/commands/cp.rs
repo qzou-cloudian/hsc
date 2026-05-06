@@ -13,7 +13,7 @@ use walkdir::WalkDir;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaClientProvider};
+use crate::rdma::{RdmaInterceptor, RdmaClientProvider, RdmaClientChannel};
 
 #[cfg(feature = "rdma")]
 use std::sync::{
@@ -328,16 +328,18 @@ pub async fn upload_file(
         if let Some(ref provider) = rdma {
             let mut buffer = tokio::fs::read(local_path).await?;
             let size = buffer.len();
-            let suitable = provider.is_memory_suitable(buffer.as_ptr(), size);
-            if suitable {
-                provider.register_memory(buffer.as_mut_ptr(), size)?;
-            }
-            let maybe_token: Option<Vec<u8>> = if suitable {
-                let s3_key = format!("{bucket}/{key}");
-                let max_transfer = provider.get_max_transfer_size(buffer.as_ptr());
+            let s3_key = format!("{bucket}/{key}");
+            let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
+                if provider.is_memory_suitable(buffer.as_ptr(), size) {
+                    provider.bind(buffer.as_mut_ptr(), size, s3_key.as_bytes()).ok()
+                } else {
+                    None
+                };
+            let maybe_token: Option<Vec<u8>> = if let Some(ref channel) = maybe_channel {
+                let max_transfer = channel.get_max_transfer_size();
                 if size <= max_transfer {
                     // Single token — existing behaviour.
-                    match provider.prepare_put_token(s3_key.as_bytes(), buffer.as_ptr(), size, 0) {
+                    match channel.prepare_put_token(0, size) {
                         Ok(t) => Some(t),
                         Err(e) => {
                             if e.is_fallback_eligible() {
@@ -358,9 +360,7 @@ pub async fn upload_file(
                     let mut ok = true;
                     while off < size {
                         let n = max_transfer.min(size - off);
-                        // SAFETY: off < size and buffer has `size` bytes allocated.
-                        let ptr = unsafe { buffer.as_ptr().add(off) };
-                        match provider.prepare_put_token(s3_key.as_bytes(), ptr, n, 0) {
+                        match channel.prepare_put_token(off, n) {
                             Ok(tok) => {
                                 tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
                                 off += n;
@@ -390,6 +390,8 @@ pub async fn upload_file(
             // reflects SHA256 of the empty string, as the server expects.
             let rdma_body = ByteStream::from_static(b"");
             if let Some(token) = maybe_token {
+                let channel_arc: Arc<dyn RdmaClientChannel> =
+                    Arc::from(maybe_channel.unwrap());
                 let rdma_confirmed = Arc::new(AtomicBool::new(false));
                 let (cksum_alg, cksum_val) = compute_put_checksum(
                     &buffer,
@@ -397,7 +399,7 @@ pub async fn upload_file(
                     checksum_algorithm.as_ref(),
                 );
                 let interceptor = RdmaInterceptor::new_put(
-                    Arc::clone(provider),
+                    channel_arc,
                     token,
                     size,
                     rdma_confirmed,
@@ -423,11 +425,7 @@ pub async fn upload_file(
                     .send()
                     .await?;
             }
-            if suitable {
-                if let Err(e) = provider.deregister_memory(buffer.as_mut_ptr()) {
-                    eprintln!("[rdma] deregister_memory failed: {e}");
-                }
-            }
+            // maybe_channel is dropped here (or was consumed above), deregistering memory.
             println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
             return Ok(());
         }
@@ -539,12 +537,11 @@ async fn upload_file_multipart(
     // outside the CUDA-accessible region on cuobj hardware, causing
     // prepare_put_token to fail silently and losing the RDMA token.
     //
-    // register_memory / deregister_memory are still called per-part because
-    // providers such as MockRdmaProvider create one SHM file per registration:
-    // after process_reply_token confirms a part the SHM entry is removed, so
-    // the buffer must be re-registered before the next prepare_put_token.
-    // For cuobj both functions are no-ops (real registration happens inside
-    // prepare_put_token), so the extra calls cost nothing.
+    // bind() is called per-part because providers such as MockRdmaProvider create
+    // one SHM entry per binding: after process_rdma_reply confirms a part the
+    // entry is removed, so the buffer must be re-bound before the next token
+    // generation.  For cuobj both bind/drop are lightweight (real registration
+    // happens inside prepare_put_token), so the extra calls cost nothing.
     #[cfg(feature = "rdma")]
     let (mut rdma_buffer, rdma_memory_ok) = if let Some(ref provider) = rdma {
         let buf = vec![0u8; chunk_size as usize];
@@ -625,24 +622,27 @@ async fn upload_file_multipart(
         #[cfg(feature = "rdma")]
         let upload_part_response = {
             if let Some(ref provider) = rdma {
-                // Register the buffer for this part.  This is a no-op for cuobj
-                // (real registration is inside prepare_put_token) but creates the
-                // SHM entry the mock provider needs for each transfer.
-                let registered = rdma_memory_ok
-                    && provider
-                        .register_memory(rdma_buffer.as_mut_ptr(), bytes_read)
-                        .is_ok();
-
-                let maybe_token = if registered {
+                // Bind the buffer for this part.  This creates the SHM entry the
+                // mock provider needs for each transfer, or is lightweight for cuobj.
+                // Dropping the channel at end of scope deregisters the memory.
+                let maybe_channel: Option<Box<dyn RdmaClientChannel>> = if rdma_memory_ok {
                     let s3_key = format!("{bucket}/{key}");
                     provider
-                        .prepare_put_token(s3_key.as_bytes(), rdma_buffer.as_ptr(), bytes_read, 0)
+                        .bind(rdma_buffer.as_mut_ptr(), bytes_read, s3_key.as_bytes())
                         .ok()
                 } else {
                     None
                 };
 
+                let maybe_token = if let Some(ref channel) = maybe_channel {
+                    channel.prepare_put_token(0, bytes_read).ok()
+                } else {
+                    None
+                };
+
                 let resp = if let Some(token) = maybe_token {
+                    let channel_arc: Arc<dyn RdmaClientChannel> =
+                        Arc::from(maybe_channel.unwrap());
                     let rdma_confirmed = Arc::new(AtomicBool::new(false));
                     let (cksum_alg, cksum_val) = compute_put_checksum(
                         &rdma_buffer[..bytes_read],
@@ -651,7 +651,7 @@ async fn upload_file_multipart(
                     );
                     part_cksum_val = cksum_val.clone();
                     let interceptor = RdmaInterceptor::new_put(
-                        Arc::clone(provider),
+                        channel_arc,
                         token,
                         bytes_read,
                         rdma_confirmed,
@@ -672,6 +672,7 @@ async fn upload_file_multipart(
                         .await?
                 } else {
                     // RDMA token unavailable — fall back to plain HTTP body.
+                    // maybe_channel is dropped here, deregistering if it was bound.
                     let body = part_data.unwrap_or_else(|| rdma_buffer[..bytes_read].to_vec());
                     let (resp, cksum) = upload_part_http(
                         client,
@@ -688,13 +689,7 @@ async fn upload_file_multipart(
                     part_cksum_val = cksum;
                     resp
                 };
-
-                // Deregister the buffer.  If process_reply_token already cleaned
-                // up the entry (RDMA confirmed), this is a no-op.  For cuobj this
-                // call is always a no-op.
-                if registered {
-                    let _ = provider.deregister_memory(rdma_buffer.as_mut_ptr());
-                }
+                // maybe_channel Arc dropped here (or already consumed above) → deregisters.
                 resp
             } else {
                 let body_data: Vec<u8> =
@@ -845,18 +840,18 @@ pub async fn download_file(
         let head = client.head_object().bucket(bucket).key(key).send().await?;
         let size = head.content_length().unwrap_or(0).max(0) as usize;
         let mut buffer: Vec<u8> = vec![0u8; size];
-        let suitable = size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size);
-        if suitable {
-            provider.register_memory(buffer.as_mut_ptr(), size)?;
-        }
-        let maybe_token: Option<Vec<u8>> = if suitable {
-            let s3_key = format!("{bucket}/{key}");
-            let max_transfer = provider.get_max_transfer_size(buffer.as_ptr());
+        let s3_key = format!("{bucket}/{key}");
+        let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
+            if size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size) {
+                provider.bind(buffer.as_mut_ptr(), size, s3_key.as_bytes()).ok()
+            } else {
+                None
+            };
+        let maybe_token: Option<Vec<u8>> = if let Some(ref channel) = maybe_channel {
+            let max_transfer = channel.get_max_transfer_size();
             if size <= max_transfer {
                 // Single token — existing behaviour.
-                provider
-                    .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), size, 0)
-                    .ok()
+                channel.prepare_get_token(0, size).ok()
             } else {
                 // Buffer exceeds provider's single-token limit — split into N tokens.
                 // Each token encodes its own size; no separate sizes header needed.
@@ -865,9 +860,7 @@ pub async fn download_file(
                 let mut ok = true;
                 while off < size {
                     let n = max_transfer.min(size - off);
-                    // SAFETY: off < size and buffer has `size` bytes allocated.
-                    let ptr = unsafe { buffer.as_mut_ptr().add(off) };
-                    match provider.prepare_get_token(s3_key.as_bytes(), ptr, n, 0) {
+                    match channel.prepare_get_token(off, n) {
                         Ok(tok) => {
                             tok_strs.push(String::from_utf8_lossy(&tok).into_owned());
                             off += n;
@@ -904,8 +897,9 @@ pub async fn download_file(
         }
         let rdma_confirmed = Arc::new(AtomicBool::new(false));
         let response = if let Some(token) = maybe_token {
+            let channel_arc: Arc<dyn RdmaClientChannel> = Arc::from(maybe_channel.unwrap());
             let interceptor = RdmaInterceptor::new_get(
-                Arc::clone(provider),
+                channel_arc,
                 token,
                 size,
                 Arc::clone(&rdma_confirmed),
@@ -924,9 +918,7 @@ pub async fn download_file(
                 file.write_all(&chunk).await?;
             }
         }
-        if suitable {
-            let _ = provider.deregister_memory(buffer.as_mut_ptr());
-        }
+        // maybe_channel dropped here (or consumed above) → deregisters memory.
         println!("Downloaded: s3://{bucket}/{key} -> {local_path}");
         return Ok(());
     }

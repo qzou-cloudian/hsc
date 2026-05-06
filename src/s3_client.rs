@@ -268,9 +268,8 @@ impl Default for S3ClientConfig {
 /// - AWS_SECRET_ACCESS_KEY: Secret access key
 /// - AWS_SESSION_TOKEN: Session token (for temporary credentials)
 /// - HSC_RDMA: RDMA provider selection.  Accepted values:
-///   `rdma` or `auto` (enable, auto-select provider), `mock` (use mock provider),
+///   `cuobj` or `auto` (enable, auto-select provider), `mock` (use mock provider),
 ///   `true`/`1` (same as `auto`), `false`/`0` (disable).
-/// - HSC_RDMA_MOCK: Set to `true` or `1` to use mock RDMA provider
 /// - HSC_DEBUG: Set to a non-empty value to enable request/response header logging
 /// - HSC_RESOLVE: Comma-separated list of `HOST:PORT:IP` resolve overrides (same
 ///   format as `--resolve`); entries are merged with any `--resolve` CLI flags.
@@ -483,7 +482,7 @@ pub async fn create_s3_client(
 /// Priority: CLI flag (already on config) > `HSC_RDMA` env > config file > default false.
 ///
 /// The `rdma` key in the config file accepts the same values as `HSC_RDMA`:
-/// `rdma`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
+/// `cuobj`, `auto`, `mock`, `true`/`1` (enable), `false`/`0` (disable).
 pub fn resolve_rdma_settings(config: &mut S3ClientConfig) {
     if config.rdma_provider.is_some() {
         // Normalize the CLI-provided value (e.g. "auto" → actual provider).

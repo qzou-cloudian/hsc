@@ -5,7 +5,7 @@ use tokio::fs::File;
 use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaClientProvider};
+use crate::rdma::{RdmaInterceptor, RdmaClientProvider, RdmaClientChannel};
 #[cfg(feature = "rdma")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -149,15 +149,15 @@ async fn cat_s3_object(
 
         if let Some(size) = byte_count {
             let mut buffer: Vec<u8> = vec![0u8; size];
-            let suitable = size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size);
-            if suitable {
-                provider.register_memory(buffer.as_mut_ptr(), size)?;
-            }
-            let maybe_token = if suitable {
-                let s3_key = format!("{bucket}/{key}");
-                provider
-                    .prepare_get_token(s3_key.as_bytes(), buffer.as_mut_ptr(), size, 0)
-                    .ok()
+            let s3_key = format!("{bucket}/{key}");
+            let maybe_channel: Option<Box<dyn RdmaClientChannel>> =
+                if size > 0 && provider.is_memory_suitable(buffer.as_ptr(), size) {
+                    provider.bind(buffer.as_mut_ptr(), size, s3_key.as_bytes()).ok()
+                } else {
+                    None
+                };
+            let maybe_token = if let Some(ref channel) = maybe_channel {
+                channel.prepare_get_token(0, size).ok()
             } else {
                 None
             };
@@ -174,8 +174,9 @@ async fn cat_s3_object(
             }
             let rdma_confirmed = Arc::new(AtomicBool::new(false));
             let response = if let Some(token) = maybe_token {
+                let channel_arc: Arc<dyn RdmaClientChannel> = Arc::from(maybe_channel.unwrap());
                 let interceptor = RdmaInterceptor::new_get(
-                    Arc::clone(provider),
+                    channel_arc,
                     token,
                     size,
                     Arc::clone(&rdma_confirmed),
@@ -194,9 +195,7 @@ async fn cat_s3_object(
                     stdout.write_all(&bytes).await?;
                 }
             }
-            if suitable {
-                let _ = provider.deregister_memory(buffer.as_mut_ptr());
-            }
+            // maybe_channel dropped here (or consumed above) → deregisters memory.
             stdout.flush().await?;
             return Ok(());
         }
