@@ -31,7 +31,7 @@ glob = "0.3.3"
 hyper = { version = "0.14", features = ["full"] }
 hyper-rustls = { version = "0.24", features = ["rustls-native-certs", "http2"] }
 rustls = { version = "0.21", features = ["dangerous_configuration"] }
-s3-rdma = { path = "../s3-rdma/core", optional = true }
+s3-rdma = { path = "../s3-rdma", optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 md-5 = "0.10.6"
