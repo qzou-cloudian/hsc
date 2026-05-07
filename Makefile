@@ -57,7 +57,8 @@ cargo build --release $(if $(FEATURES),--features $(FEATURES)) \
 cp /cargo/target/release/hsc /out/; \
 if echo "$(FEATURES)" | grep -q rdma; then \
     cargo build --release \
-        --manifest-path ../s3-rdma/providers/client/Cargo.toml \
+        --manifest-path ../s3-rdma/Cargo.toml \
+        -p s3-rdma-client \
         --features cuobj \
         --target-dir /cargo/target-cuobj; \
     cp /cargo/target-cuobj/release/libs3rdmaclient.so /out/; \
