@@ -635,7 +635,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "rdma")]
     let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaClientProvider>> =
         match &client_config_clone.rdma_provider {
-            Some(p) => match rdma::create_client_provider(p, client_config_clone.debug, &Default::default()) {
+            Some(p) => match rdma::create_client_provider(p, client_config_clone.debug) {
                 Ok(provider) => Some(provider),
                 Err(e) => {
                     eprintln!(

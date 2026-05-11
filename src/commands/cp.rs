@@ -332,9 +332,7 @@ pub async fn upload_file(
             // Provider allocates and registers the buffer; we copy file data into it.
             let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
                 provider.bind(size, s3_key.as_bytes()).ok().map(|ch| {
-                    let buf = unsafe {
-                        std::slice::from_raw_parts_mut(ch.ptr() as *mut u8, ch.size())
-                    };
+                    let buf = unsafe { std::slice::from_raw_parts_mut(ch.ptr(), ch.size()) };
                     buf[..size].copy_from_slice(&data[..size]);
                     Arc::from(ch)
                 })
@@ -342,7 +340,7 @@ pub async fn upload_file(
                 None
             };
             // Prepare RDMA token(s) and collect handles for complete_put.
-            let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaPutHandle>)> =
+            let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
                 if let Some(ref channel) = maybe_channel {
                     let max_transfer = channel.get_max_transfer_size();
                     if size <= max_transfer {
@@ -543,8 +541,6 @@ async fn upload_file_multipart(
     let mut uploaded_bytes = 0u64;
 
     loop {
-        let bytes_read;
-
         // Read the next chunk.  Both RDMA and plain-HTTP paths read into a
         // local Vec first; the RDMA path then copies into the provider-owned
         // channel buffer via channel.ptr().
@@ -561,7 +557,7 @@ async fn upload_file_multipart(
             break;
         }
         chunk_buf.truncate(n_read);
-        bytes_read = n_read;
+        let bytes_read = n_read;
 
         // Upload this part — with RDMA interceptor when a provider is present.
         // part_cksum_val holds the locally computed checksum for CompleteMultipartUpload:
@@ -577,14 +573,12 @@ async fn upload_file_multipart(
                 // entry per binding; dropping the channel at end of scope deregisters.
                 let maybe_channel: Option<Arc<dyn RdmaClientChannel>> =
                     provider.bind(bytes_read, s3_key.as_bytes()).ok().map(|ch| {
-                        let buf = unsafe {
-                            std::slice::from_raw_parts_mut(ch.ptr() as *mut u8, ch.size())
-                        };
+                        let buf = unsafe { std::slice::from_raw_parts_mut(ch.ptr(), ch.size()) };
                         buf[..bytes_read].copy_from_slice(&chunk_buf[..bytes_read]);
                         Arc::from(ch)
                     });
 
-                let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaPutHandle>)> =
+                let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
                     if let Some(ref channel) = maybe_channel {
                         channel.prepare_put(0, bytes_read).ok().map(|h| {
                             let token = h.token().to_vec();
@@ -797,7 +791,7 @@ pub async fn download_file(
         } else {
             None
         };
-        let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaGetHandle>)> =
+        let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
             if let Some(ref channel) = maybe_channel {
                 let max_transfer = channel.get_max_transfer_size();
                 if size <= max_transfer {

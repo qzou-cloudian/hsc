@@ -12,10 +12,11 @@
 //!
 //! let provider: Arc<dyn RdmaClientProvider> = Arc::new(MockRdmaProvider::new(false, "/dev/shm".into(), 0));
 //! let confirmed = Arc::new(AtomicBool::new(false));
-//! // Bind buffer to create a channel, then generate a token from it.
-//! let channel: Arc<dyn RdmaClientChannel> = Arc::from(provider.bind(buf.as_mut_ptr(), size, key.as_bytes())?);
-//! let token = channel.prepare_get_token(0, size)?;
-//! let interceptor = RdmaInterceptor::new_get(Arc::clone(&channel), token, size, Arc::clone(&confirmed), debug);
+//! // Bind a channel, prepare a GET handle, and extract its token.
+//! let channel: Arc<dyn RdmaClientChannel> = provider.bind(size, key.as_bytes()).map(Arc::from)?;
+//! let handle = channel.prepare_get(0, size)?;
+//! let token = handle.token().to_vec();
+//! let interceptor = RdmaInterceptor::new_get(Arc::clone(&channel), token, vec![handle], size, Arc::clone(&confirmed), debug);
 //!
 //! let resp = client.get_object()...customize().interceptor(interceptor).send().await?;
 //! if confirmed.load(Ordering::Acquire) { /* use RDMA buffer */ }
@@ -35,7 +36,7 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 
-use s3_rdma::{RdmaClientChannel, RdmaPutHandle, RdmaGetHandle};
+use s3_rdma::{RdmaClientChannel, RdmaTransferHandle};
 use s3_rdma::provider::{RDMA_BYTES_HEADER, RDMA_REPLY_HEADER, RDMA_TOKEN_HEADER};
 
 // ── RdmaHandles ──────────────────────────────────────────────────────────────
@@ -43,8 +44,8 @@ use s3_rdma::provider::{RDMA_BYTES_HEADER, RDMA_REPLY_HEADER, RDMA_TOKEN_HEADER}
 /// Holds the typed RDMA handles for an in-flight operation so
 /// `complete_put` / `complete_get` can be called in `read_after_transmit`.
 enum RdmaHandles {
-    Put(Vec<RdmaPutHandle>),
-    Get(Vec<RdmaGetHandle>),
+    Put(Vec<RdmaTransferHandle>),
+    Get(Vec<RdmaTransferHandle>),
 }
 
 // ── RdmaInterceptor ──────────────────────────────────────────────────────────
@@ -100,7 +101,7 @@ impl RdmaInterceptor {
     ///
     /// `token` is the pre-joined `x-amz-rdma-token` value (may be
     /// `|`-separated for multi-token transfers).  `handles` are the
-    /// [`RdmaPutHandle`]s returned by [`RdmaClientChannel::prepare_put`];
+    /// [`RdmaTransferHandle`]s returned by [`RdmaClientChannel::prepare_put`];
     /// they are consumed in `read_after_transmit` to call `complete_put`.
     ///
     /// `checksum_algorithm` and `checksum_value` are injected as
@@ -110,7 +111,7 @@ impl RdmaInterceptor {
     pub fn new_put(
         channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
-        handles: Vec<RdmaPutHandle>,
+        handles: Vec<RdmaTransferHandle>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
@@ -132,12 +133,12 @@ impl RdmaInterceptor {
     /// Create an interceptor for a GET (download) request.
     ///
     /// `token` is the pre-joined `x-amz-rdma-token` value.  `handles` are the
-    /// [`RdmaGetHandle`]s returned by [`RdmaClientChannel::prepare_get`];
+    /// [`RdmaTransferHandle`]s returned by [`RdmaClientChannel::prepare_get`];
     /// they are consumed in `read_after_transmit` to call `complete_get`.
     pub fn new_get(
         channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
-        handles: Vec<RdmaGetHandle>,
+        handles: Vec<RdmaTransferHandle>,
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
@@ -175,15 +176,10 @@ impl Intercept for RdmaInterceptor {
         // Always remove SDK-auto-computed checksum headers for all algorithms.
         // For RDMA the HTTP body is empty, so any SDK-computed checksum would be
         // wrong (CRC32 of "" rather than CRC32 of the actual data).
-        for h in &[
-            "x-amz-checksum-crc32",
-            "x-amz-checksum-crc32c",
-            "x-amz-checksum-sha1",
-            "x-amz-checksum-sha256",
-            "x-amz-sdk-checksum-algorithm",
-        ] {
+        for h in CHECKSUM_HEADERS {
             headers.remove(*h);
         }
+        headers.remove("x-amz-sdk-checksum-algorithm");
         // Inject our precomputed checksum only when one was requested.
         if let (Some(alg), Some(val)) = (&self.checksum_algorithm, &self.checksum_value) {
             if self.debug {

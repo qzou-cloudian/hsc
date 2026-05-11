@@ -155,7 +155,7 @@ async fn cat_s3_object(
             } else {
                 None
             };
-            let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaGetHandle>)> =
+            let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
                 if let Some(ref channel) = maybe_channel {
                     channel.prepare_get(0, size).ok().map(|h| {
                         let token = h.token().to_vec();
