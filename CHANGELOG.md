@@ -2,6 +2,38 @@
 
 All notable changes to hsc will be documented in this file.
 
+## [0.5.0] - 2026-05-10
+
+### Changed
+
+- **RDMA handle types unified**: `RdmaPutHandle` and `RdmaGetHandle` are replaced by a
+  single `RdmaTransferHandle` type, matching the updated `s3-rdma` API. Affects the
+  `cp`, `cat`, and `cmp` commands and the `RdmaInterceptor`.
+
+- **`create_client_provider` signature simplified**: the unused options argument
+  (`&Default::default()`) has been removed.
+
+- **RDMA channel API migration**: internal transfer paths now use the `RdmaClientChannel`
+  trait throughout; previously mixed raw-pointer and channel-based APIs removed.
+
+- **`s3-rdma` source path updated**: `core/` subdirectory promoted to repository root;
+  Cargo path dependency and workspace manifest updated accordingly.
+
+### Build
+
+- **Workspace manifest** added to drive the `s3-rdma-client` plugin build alongside the
+  main binary, replacing per-directory invocations.
+
+### Internal
+
+- Removed unnecessary `as *mut u8` cast in `cp.rs` RDMA upload paths (pointer type
+  already correct after `RdmaClientChannel::ptr()` return-type change).
+- Fixed stale usage example in `src/rdma/interceptor.rs` doc comment (wrong `bind`
+  signature, non-existent `prepare_get_token` method, missing `handles` argument).
+- Consolidated checksum header stripping in `RdmaInterceptor::modify_before_signing` to
+  reuse the `CHECKSUM_HEADERS` constant; also closes a gap where `crc64nvme` was not
+  stripped from outgoing requests.
+
 ## [0.3.3] - 2026-05-04
 
 ### Added
