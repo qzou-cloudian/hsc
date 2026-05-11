@@ -647,7 +647,7 @@ fn profile_section_header(profile: &str) -> String {
 /// | `auto`, `true`, `1`, `yes`, `on`| `Some("auto")`   |
 /// | `false`, `0`, `no`, `off`, …    | `None`           |
 ///
-/// The returned string is passed directly to `s3_rdma::create_client_provider`.
+/// The returned string is passed directly to `RdmaProviderConfig::builder().provider(…).build_client()`.
 /// `"rdma"` is accepted as a legacy alias for `"cuobj"`.
 fn parse_rdma_provider_value(value: &str) -> Option<String> {
     match value.to_lowercase().as_str() {
