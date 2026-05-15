@@ -403,16 +403,25 @@ async fn open_reader(
                 let s3_key = format!("{}/{}", bucket, key);
                 // Provider allocates and registers the buffer.
                 let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if byte_count > 0 {
-                    provider.bind(byte_count, s3_key.as_bytes()).ok().map(Arc::from)
+                    match provider.bind(byte_count, s3_key.as_bytes()) {
+                        Ok(ch) => Some(Arc::from(ch)),
+                        Err(e) => {
+                            eprintln!("[rdma] bind failed ({e}); falling back to plain HTTP");
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
                 let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
                     if let Some(ref channel) = maybe_channel {
-                        channel.prepare_get(0, byte_count).ok().map(|h| {
-                            let token = h.token().to_vec();
-                            (token, vec![h])
-                        })
+                        match channel.prepare_get(0, byte_count) {
+                            Ok(h) => Some((h.token().to_vec(), vec![h])),
+                            Err(e) => {
+                                eprintln!("[rdma] prepare_get failed ({e}); falling back to plain HTTP");
+                                None
+                            }
+                        }
                     } else {
                         None
                     };

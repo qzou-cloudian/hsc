@@ -331,11 +331,17 @@ pub async fn upload_file(
             let s3_key = format!("{bucket}/{key}");
             // Provider allocates and registers the buffer; we copy file data into it.
             let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
-                provider.bind(size, s3_key.as_bytes()).ok().map(|ch| {
-                    let buf = unsafe { std::slice::from_raw_parts_mut(ch.ptr(), ch.size()) };
-                    buf[..size].copy_from_slice(&data[..size]);
-                    Arc::from(ch)
-                })
+                match provider.bind(size, s3_key.as_bytes()) {
+                    Ok(ch) => {
+                        let buf = unsafe { std::slice::from_raw_parts_mut(ch.ptr(), ch.size()) };
+                        buf[..size].copy_from_slice(&data[..size]);
+                        Some(Arc::from(ch))
+                    }
+                    Err(e) => {
+                        eprintln!("[rdma] bind failed ({e}); falling back to plain HTTP");
+                        None
+                    }
+                }
             } else {
                 None
             };
@@ -425,18 +431,11 @@ pub async fn upload_file(
                     .interceptor(interceptor)
                     .send()
                     .await?;
-            } else {
-                client
-                    .put_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .body(rdma_body)
-                    .send()
-                    .await?;
+                // maybe_channel consumed above → deregisters memory.
+                println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
+                return Ok(());
             }
-            // maybe_channel dropped here (or consumed above) → deregisters memory.
-            println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
-            return Ok(());
+            // RDMA bind or prepare failed; fall through to standard HTTP upload below.
         }
 
         let body;
@@ -572,18 +571,29 @@ async fn upload_file_multipart(
                 // bind() is called per-part because the mock provider tracks one SHM
                 // entry per binding; dropping the channel at end of scope deregisters.
                 let maybe_channel: Option<Arc<dyn RdmaClientChannel>> =
-                    provider.bind(bytes_read, s3_key.as_bytes()).ok().map(|ch| {
-                        let buf = unsafe { std::slice::from_raw_parts_mut(ch.ptr(), ch.size()) };
-                        buf[..bytes_read].copy_from_slice(&chunk_buf[..bytes_read]);
-                        Arc::from(ch)
-                    });
+                    match provider.bind(bytes_read, s3_key.as_bytes()) {
+                        Ok(ch) => {
+                            let buf = unsafe { std::slice::from_raw_parts_mut(ch.ptr(), ch.size()) };
+                            buf[..bytes_read].copy_from_slice(&chunk_buf[..bytes_read]);
+                            Some(Arc::from(ch))
+                        }
+                        Err(e) => {
+                            eprintln!("[rdma] bind failed ({e}); falling back to plain HTTP");
+                            None
+                        }
+                    };
 
                 let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
                     if let Some(ref channel) = maybe_channel {
-                        channel.prepare_put(0, bytes_read).ok().map(|h| {
-                            let token = h.token().to_vec();
-                            (token, vec![h])
-                        })
+                        match channel.prepare_put(0, bytes_read) {
+                            Ok(h) => Some((h.token().to_vec(), vec![h])),
+                            Err(e) => {
+                                eprintln!(
+                                    "[rdma] prepare_put failed for part ({e}); falling back to plain HTTP"
+                                );
+                                None
+                            }
+                        }
                     } else {
                         None
                     };
@@ -787,7 +797,13 @@ pub async fn download_file(
         let s3_key = format!("{bucket}/{key}");
         // Provider allocates and registers the buffer.
         let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
-            provider.bind(size, s3_key.as_bytes()).ok().map(Arc::from)
+            match provider.bind(size, s3_key.as_bytes()) {
+                Ok(ch) => Some(Arc::from(ch)),
+                Err(e) => {
+                    eprintln!("[rdma] bind failed ({e}); falling back to plain HTTP");
+                    None
+                }
+            }
         } else {
             None
         };
@@ -796,10 +812,13 @@ pub async fn download_file(
                 let max_transfer = channel.get_max_transfer_size();
                 if size <= max_transfer {
                     // Single token — existing behaviour.
-                    channel.prepare_get(0, size).ok().map(|h| {
-                        let token = h.token().to_vec();
-                        (token, vec![h])
-                    })
+                    match channel.prepare_get(0, size) {
+                        Ok(h) => Some((h.token().to_vec(), vec![h])),
+                        Err(e) => {
+                            eprintln!("[rdma] prepare_get failed ({e}); falling back to plain HTTP");
+                            None
+                        }
+                    }
                 } else {
                     // Buffer exceeds provider's single-token limit — split into N tokens.
                     let mut tok_strs = Vec::new();

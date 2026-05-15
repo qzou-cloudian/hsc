@@ -151,16 +151,25 @@ async fn cat_s3_object(
             let s3_key = format!("{bucket}/{key}");
             // Provider allocates and registers the buffer.
             let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if size > 0 {
-                provider.bind(size, s3_key.as_bytes()).ok().map(Arc::from)
+                match provider.bind(size, s3_key.as_bytes()) {
+                    Ok(ch) => Some(Arc::from(ch)),
+                    Err(e) => {
+                        eprintln!("[rdma] bind failed ({e}); falling back to plain HTTP");
+                        None
+                    }
+                }
             } else {
                 None
             };
             let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
                 if let Some(ref channel) = maybe_channel {
-                    channel.prepare_get(0, size).ok().map(|h| {
-                        let token = h.token().to_vec();
-                        (token, vec![h])
-                    })
+                    match channel.prepare_get(0, size) {
+                        Ok(h) => Some((h.token().to_vec(), vec![h])),
+                        Err(e) => {
+                            eprintln!("[rdma] prepare_get failed ({e}); falling back to plain HTTP");
+                            None
+                        }
+                    }
                 } else {
                     None
                 };
