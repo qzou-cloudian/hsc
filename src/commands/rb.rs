@@ -1,3 +1,4 @@
+use crate::commands::listing::{list_s3_keys, s3_prefix_has_objects};
 use crate::path_utils::{parse_s3_uri, PathType};
 use aws_sdk_s3::Client;
 
@@ -27,14 +28,7 @@ pub async fn remove_bucket(
 
     // Check if bucket is empty unless force flag is set
     if !force {
-        let objects = client
-            .list_objects_v2()
-            .bucket(&bucket_name)
-            .max_keys(1)
-            .send()
-            .await?;
-
-        if !objects.contents().is_empty() {
+        if s3_prefix_has_objects(client, &bucket_name, "").await? == Some(true) {
             return Err(format!(
                 "Bucket '{}' is not empty. Use --force to delete non-empty bucket",
                 bucket_name
@@ -60,39 +54,14 @@ async fn delete_all_objects(
     client: &Client,
     bucket: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut continuation_token: Option<String> = None;
-
-    loop {
-        let mut request = client.list_objects_v2().bucket(bucket);
-
-        if let Some(token) = continuation_token {
-            request = request.continuation_token(token);
-        }
-
-        let response = request.send().await?;
-
-        let objects = response.contents();
-        if objects.is_empty() {
-            break;
-        }
-
-        for obj in objects {
-            if let Some(key) = obj.key() {
-                client
-                    .delete_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .send()
-                    .await?;
-                println!("Deleted: {}", key);
-            }
-        }
-
-        if response.is_truncated() == Some(true) {
-            continuation_token = response.next_continuation_token().map(|s| s.to_string());
-        } else {
-            break;
-        }
+    for key in list_s3_keys(client, bucket, "").await? {
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(&key)
+            .send()
+            .await?;
+        println!("Deleted: {}", key);
     }
 
     Ok(())

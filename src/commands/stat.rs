@@ -1,14 +1,11 @@
+use crate::commands::hash::{compute_hash_for_local_path, HashAlgorithm};
+use crate::commands::listing::{list_s3_keys, s3_prefix_has_objects, walk_local_files};
+use crate::commands::object_metadata::ObjectChecksums;
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
-use crc32fast::Hasher as Crc32Hasher;
-use md5::{Digest, Md5};
 use serde_json::{json, Map, Value};
-use sha1::Sha1;
-use sha2::Sha256;
 use std::path::Path;
 use tokio::fs;
-use tokio::io::AsyncReadExt;
-use walkdir::WalkDir;
 
 /// Display information about S3 objects, buckets, or local files
 pub async fn stat(
@@ -138,23 +135,15 @@ async fn stat_bucket(client: &Client, bucket: &str) -> Result<(), Box<dyn std::e
                 }
             }
 
-            // Count objects (sample)
-            match client
-                .list_objects_v2()
-                .bucket(bucket)
-                .max_keys(1)
-                .send()
-                .await
-            {
-                Ok(result) => {
-                    if let Some(count) = result.key_count() {
-                        if count > 0 {
-                            println!("Objects   : {} (at least)", count);
-                        } else {
-                            println!("Objects   : 0 (empty)");
-                        }
+            match s3_prefix_has_objects(client, bucket, "").await {
+                Ok(Some(has_objects)) => {
+                    if has_objects {
+                        println!("Objects   : 1 (at least)");
+                    } else {
+                        println!("Objects   : 0 (empty)");
                     }
                 }
+                Ok(None) => {}
                 Err(_) => {
                     // Can't list objects
                 }
@@ -219,16 +208,8 @@ async fn stat_bucket_json(
         out.insert("encryption".to_string(), json!("Enabled"));
     }
 
-    if let Ok(result) = client
-        .list_objects_v2()
-        .bucket(bucket)
-        .max_keys(1)
-        .send()
-        .await
-    {
-        if let Some(count) = result.key_count() {
-            out.insert("objects".to_string(), json!(count));
-        }
+    if let Ok(Some(has_objects)) = s3_prefix_has_objects(client, bucket, "").await {
+        out.insert("objects".to_string(), json!(u8::from(has_objects)));
     }
 
     Ok(Value::Object(out))
@@ -280,19 +261,7 @@ async fn stat_object(
         println!("Storage   : {}", storage_class.as_str());
     }
 
-    // Checksums
-    if let Some(checksum) = response.checksum_crc32() {
-        println!("CRC32     : {}", checksum);
-    }
-    if let Some(checksum) = response.checksum_crc32_c() {
-        println!("CRC32C    : {}", checksum);
-    }
-    if let Some(checksum) = response.checksum_sha1() {
-        println!("SHA1      : {}", checksum);
-    }
-    if let Some(checksum) = response.checksum_sha256() {
-        println!("SHA256    : {}", checksum);
-    }
+    ObjectChecksums::from_head_object(&response).print_stat_lines();
 
     // Server Side Encryption
     if let Some(sse) = response.server_side_encryption() {
@@ -356,18 +325,7 @@ async fn stat_object_json(
     if let Some(storage_class) = response.storage_class() {
         out.insert("storage_class".to_string(), json!(storage_class.as_str()));
     }
-    if let Some(checksum) = response.checksum_crc32() {
-        out.insert("crc32".to_string(), json!(checksum));
-    }
-    if let Some(checksum) = response.checksum_crc32_c() {
-        out.insert("crc32c".to_string(), json!(checksum));
-    }
-    if let Some(checksum) = response.checksum_sha1() {
-        out.insert("sha1".to_string(), json!(checksum));
-    }
-    if let Some(checksum) = response.checksum_sha256() {
-        out.insert("sha256".to_string(), json!(checksum));
-    }
+    ObjectChecksums::from_head_object(&response).insert_stat_json(&mut out);
     if let Some(sse) = response.server_side_encryption() {
         out.insert("encryption".to_string(), json!(sse.as_str()));
     }
@@ -433,7 +391,7 @@ async fn stat_local(
     // For files, calculate ETag and checksums
     if metadata.is_file() {
         // Calculate MD5 (ETag equivalent)
-        if let Ok(etag) = calculate_file_md5(path_obj).await {
+        if let Ok(etag) = compute_hash_for_local_path(path_obj, HashAlgorithm::Md5).await {
             println!("ETag      : \"{}\"", etag);
         }
 
@@ -458,37 +416,9 @@ async fn stat_local(
             println!("Content   : application/octet-stream");
         }
 
-        // Calculate checksums if requested
-        if checksum.is_some() {
-            match checksum.as_deref().map(|s| s.to_uppercase()).as_deref() {
-                Some("CRC32") => {
-                    if let Ok(result) = calculate_file_crc32(path_obj).await {
-                        println!("CRC32     : {}", result);
-                    }
-                }
-                Some("CRC32C") => {
-                    // CRC32C is similar to CRC32, using same implementation for demo
-                    if let Ok(result) = calculate_file_crc32(path_obj).await {
-                        println!("CRC32C    : {}", result);
-                    }
-                }
-                Some("SHA1") => {
-                    if let Ok(result) = calculate_file_sha1(path_obj).await {
-                        println!("SHA1      : {}", result);
-                    }
-                }
-                Some("SHA256") => {
-                    if let Ok(result) = calculate_file_sha256(path_obj).await {
-                        println!("SHA256    : {}", result);
-                    }
-                }
-                _ => {
-                    // Default (bare --checksum / ENABLED): compute SHA256
-                    if let Ok(result) = calculate_file_sha256(path_obj).await {
-                        println!("SHA256    : {}", result);
-                    }
-                }
-            }
+        if let Ok(Some(result)) = calculate_requested_checksum(path_obj, checksum.as_deref()).await
+        {
+            println!("{:<10}: {}", result.display_label, result.value);
         }
     }
 
@@ -554,7 +484,7 @@ async fn stat_local_json(
     }
 
     if metadata.is_file() {
-        if let Ok(etag) = calculate_file_md5(path_obj).await {
+        if let Ok(etag) = compute_hash_for_local_path(path_obj, HashAlgorithm::Md5).await {
             out.insert("etag".to_string(), json!(etag));
         }
         out.insert(
@@ -582,23 +512,6 @@ async fn stat_local_json(
     Ok(Value::Object(out))
 }
 
-/// Calculate MD5 hash of a file (ETag equivalent)
-async fn calculate_file_md5(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = fs::File::open(path).await?;
-    let mut hasher = Md5::new();
-    let mut buffer = vec![0u8; 8192];
-
-    loop {
-        let n = file.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
 fn detect_content_type(path_obj: &Path) -> &'static str {
     match path_obj.extension().and_then(|e| e.to_str()) {
         Some("txt") => "text/plain",
@@ -621,90 +534,50 @@ async fn insert_requested_checksum(
     path_obj: &Path,
     checksum: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match checksum.as_deref().map(|s| s.to_uppercase()).as_deref() {
-        Some("CRC32") => {
-            out.insert(
-                "crc32".to_string(),
-                json!(calculate_file_crc32(path_obj).await?),
-            );
-        }
-        Some("CRC32C") => {
-            out.insert(
-                "crc32c".to_string(),
-                json!(calculate_file_crc32(path_obj).await?),
-            );
-        }
-        Some("SHA1") => {
-            out.insert(
-                "sha1".to_string(),
-                json!(calculate_file_sha1(path_obj).await?),
-            );
-        }
-        Some("SHA256") => {
-            out.insert(
-                "sha256".to_string(),
-                json!(calculate_file_sha256(path_obj).await?),
-            );
-        }
-        _ => {
-            out.insert(
-                "sha256".to_string(),
-                json!(calculate_file_sha256(path_obj).await?),
-            );
-        }
+    if let Some(result) = calculate_requested_checksum(path_obj, checksum.as_deref()).await? {
+        out.insert(result.json_key.to_string(), json!(result.value));
     }
     Ok(())
 }
 
-/// Calculate CRC32 checksum of a file
-async fn calculate_file_crc32(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = fs::File::open(path).await?;
-    let mut hasher = Crc32Hasher::new();
-    let mut buffer = vec![0u8; 8192];
-
-    loop {
-        let n = file.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-
-    Ok(format!("{:08x}", hasher.finalize()))
+struct LocalChecksumResult {
+    display_label: &'static str,
+    json_key: &'static str,
+    value: String,
 }
 
-/// Calculate SHA1 hash of a file
-async fn calculate_file_sha1(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = fs::File::open(path).await?;
-    let mut hasher = Sha1::new();
-    let mut buffer = vec![0u8; 8192];
+async fn calculate_requested_checksum(
+    path_obj: &Path,
+    checksum: Option<&str>,
+) -> Result<Option<LocalChecksumResult>, Box<dyn std::error::Error>> {
+    let Some(checksum) = checksum else {
+        return Ok(None);
+    };
 
-    loop {
-        let n = file.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
+    let result = match checksum.to_uppercase().as_str() {
+        "CRC32" => LocalChecksumResult {
+            display_label: "CRC32",
+            json_key: "crc32",
+            value: compute_hash_for_local_path(path_obj, HashAlgorithm::Crc32).await?,
+        },
+        "CRC32C" => LocalChecksumResult {
+            display_label: "CRC32C",
+            json_key: "crc32c",
+            value: compute_hash_for_local_path(path_obj, HashAlgorithm::Crc32c).await?,
+        },
+        "SHA1" => LocalChecksumResult {
+            display_label: "SHA1",
+            json_key: "sha1",
+            value: compute_hash_for_local_path(path_obj, HashAlgorithm::Sha1).await?,
+        },
+        _ => LocalChecksumResult {
+            display_label: "SHA256",
+            json_key: "sha256",
+            value: compute_hash_for_local_path(path_obj, HashAlgorithm::Sha256).await?,
+        },
+    };
 
-    Ok(format!("{:x}", hasher.finalize()))
-}
-
-/// Calculate SHA256 hash of a file
-async fn calculate_file_sha256(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let mut file = fs::File::open(path).await?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0u8; 8192];
-
-    loop {
-        let n = file.read(&mut buffer).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buffer[..n]);
-    }
-
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(Some(result))
 }
 
 /// Stat local files recursively
@@ -723,20 +596,16 @@ async fn stat_local_recursive(
         return stat_local(path, checksum).await;
     }
 
-    // Walk directory recursively
-    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        let entry_path = entry.path();
-
-        if entry_path.is_file() {
-            stat_local(
-                entry_path.to_str().ok_or_else(|| {
-                    format!("path contains invalid UTF-8: {}", entry_path.display())
-                })?,
-                checksum.clone(),
-            )
-            .await?;
-            println!(); // Blank line between entries
-        }
+    for entry in walk_local_files(path)? {
+        stat_local(
+            entry
+                .path
+                .to_str()
+                .ok_or_else(|| format!("path contains invalid UTF-8: {}", entry.path.display()))?,
+            checksum.clone(),
+        )
+        .await?;
+        println!(); // Blank line between entries
     }
 
     Ok(())
@@ -757,19 +626,16 @@ async fn stat_local_recursive_json(
     }
 
     let mut entries = Vec::new();
-    for entry in WalkDir::new(path).into_iter().filter_map(|e| e.ok()) {
-        let entry_path = entry.path();
-        if entry_path.is_file() {
-            entries.push(
-                stat_local_json(
-                    entry_path.to_str().ok_or_else(|| {
-                        format!("path contains invalid UTF-8: {}", entry_path.display())
-                    })?,
-                    checksum.clone(),
-                )
-                .await?,
-            );
-        }
+    for entry in walk_local_files(path)? {
+        entries.push(
+            stat_local_json(
+                entry.path.to_str().ok_or_else(|| {
+                    format!("path contains invalid UTF-8: {}", entry.path.display())
+                })?,
+                checksum.clone(),
+            )
+            .await?,
+        );
     }
     Ok(entries)
 }
@@ -780,33 +646,9 @@ async fn stat_s3_recursive(
     bucket: &str,
     prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut continuation_token: Option<String> = None;
-
-    loop {
-        let mut request = client.list_objects_v2().bucket(bucket);
-
-        if !prefix.is_empty() {
-            request = request.prefix(prefix);
-        }
-
-        if let Some(token) = continuation_token {
-            request = request.continuation_token(token);
-        }
-
-        let response = request.send().await?;
-
-        for obj in response.contents() {
-            if let Some(key) = obj.key() {
-                stat_object(client, bucket, key).await?;
-                println!(); // Blank line between entries
-            }
-        }
-
-        if response.is_truncated() == Some(true) {
-            continuation_token = response.next_continuation_token().map(|s| s.to_string());
-        } else {
-            break;
-        }
+    for key in list_s3_keys(client, bucket, prefix).await? {
+        stat_object(client, bucket, &key).await?;
+        println!(); // Blank line between entries
     }
 
     Ok(())
@@ -817,33 +659,10 @@ async fn stat_s3_recursive_json(
     bucket: &str,
     prefix: &str,
 ) -> Result<Vec<Value>, Box<dyn std::error::Error>> {
-    let mut continuation_token: Option<String> = None;
     let mut entries = Vec::new();
 
-    loop {
-        let mut request = client.list_objects_v2().bucket(bucket);
-
-        if !prefix.is_empty() {
-            request = request.prefix(prefix);
-        }
-
-        if let Some(token) = continuation_token {
-            request = request.continuation_token(token);
-        }
-
-        let response = request.send().await?;
-
-        for obj in response.contents() {
-            if let Some(key) = obj.key() {
-                entries.push(stat_object_json(client, bucket, key).await?);
-            }
-        }
-
-        if response.is_truncated() == Some(true) {
-            continuation_token = response.next_continuation_token().map(|s| s.to_string());
-        } else {
-            break;
-        }
+    for key in list_s3_keys(client, bucket, prefix).await? {
+        entries.push(stat_object_json(client, bucket, &key).await?);
     }
 
     Ok(entries)

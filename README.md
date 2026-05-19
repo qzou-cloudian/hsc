@@ -7,7 +7,7 @@ between GPU memory or system memory and S3 compatible object storage using RDMA.
 
 ## Features
 
-- **12 Essential Commands**: `mb`, `rb`, `ls`, `cp`, `sync`, `mv`, `rm`, `stat`, `diff`, `cat`, `cmp`
+- **16 Commands**: core S3 operations, local/S3 inspection utilities, object tests, and object performance benchmarks
 - **RDMA Transfers**: GPU-direct data paths via NVIDIA cuObject — zero-copy between object storage and GPU memory or system memory
 - **Multipart Upload**: Automatic multipart transfers for large files with configurable thresholds
 - **Checksum Validation**: Support for CRC32, CRC32C, SHA1, and SHA256
@@ -17,17 +17,15 @@ between GPU memory or system memory and S3 compatible object storage using RDMA.
 
 ## Installation
 
-```bash
-cargo install hsc
-```
-
-Or build from source:
+Build from source:
 
 ```bash
 git clone <repository-url>
 cd hsc
 cargo build --release
 ```
+
+Prebuilt binaries and packages are produced by the release workflow. The optional RDMA feature uses a local `s3-rdma` path dependency, so crates.io installation is not currently the supported install path.
 
 ## Quick Start
 
@@ -75,7 +73,15 @@ hsc cat s3://my-bucket/file.txt --range 0-100
 - **`diff <source> <dest>`** - Compare directories or buckets
 - **`cat <path> [--range <start-end>]`** - Output file content to stdout
 - **`cmp <path1> <path2> [--range <start-end>]`** - Compare two files or objects byte-by-byte
-- **`versions s3://bucket[/prefix] [--human-readable]`** - List all object versions and delete markers
+- **`exists <path> [--json]`** - Test whether a local path, S3 bucket, or S3 object exists
+- **`hash <path> [--algorithm ALGO] [--json]`** - Compute a digest for a local file or S3 object
+- **`parts s3://bucket/key [--attributes] [--json]`** - Show multipart/object-part metadata
+- **`ls --versions s3://bucket[/prefix] [--human-readable]`** - List all object versions and delete markers
+
+### Test and Benchmark Commands
+
+- **`test object <bucket> [key] [--bytes SIZE|--file PATH]`** - Upload an object and verify range reads around chunk, part, and EC stripe boundaries
+- **`perf object put|get|list|delete <path>`** - Run object-operation benchmarks against an S3 bucket or prefix
 
 ## Configuration
 

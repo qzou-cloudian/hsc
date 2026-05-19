@@ -546,6 +546,24 @@ fn parse_s3_path_for_perf(path: &str) -> Result<(String, String), Box<dyn std::e
     Ok((bucket, prefix))
 }
 
+fn build_sse_config(
+    sse: Option<String>,
+    sse_kms_key_id: Option<String>,
+    sse_c: Option<String>,
+    sse_c_key: Option<String>,
+    sse_c_copy_source: Option<String>,
+    sse_c_copy_source_key: Option<String>,
+) -> commands::transfer::SseConfig {
+    commands::transfer::SseConfig {
+        sse,
+        sse_kms_key_id,
+        sse_c,
+        sse_c_key,
+        sse_c_copy_source,
+        sse_c_copy_source_key,
+    }
+}
+
 /// Resolve effective multipart threshold and chunk size.
 /// Priority: CLI flags > config-file defaults (already loaded into config_threshold/chunksize).
 fn resolve_multipart(
@@ -553,14 +571,132 @@ fn resolve_multipart(
     part_size: Option<String>,
     config_threshold: u64,
     config_chunksize: u64,
-) -> Result<(u64, u64), Box<dyn std::error::Error>> {
+) -> Result<commands::transfer::MultipartConfig, Box<dyn std::error::Error>> {
     if disable_multipart {
-        Ok((u64::MAX, config_chunksize))
+        Ok(commands::transfer::MultipartConfig {
+            threshold: u64::MAX,
+            chunksize: config_chunksize,
+        })
     } else if let Some(s) = part_size {
         let size = parse_size(&s)?;
-        Ok((size, size))
+        Ok(commands::transfer::MultipartConfig {
+            threshold: size,
+            chunksize: size,
+        })
     } else {
-        Ok((config_threshold, config_chunksize))
+        Ok(commands::transfer::MultipartConfig {
+            threshold: config_threshold,
+            chunksize: config_chunksize,
+        })
+    }
+}
+
+async fn dispatch_test_object(
+    client: &aws_sdk_s3::Client,
+    opts: commands::test_object::TestObjectOptions,
+    #[cfg(feature = "rdma")] rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaClientProvider>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let opts = commands::test_object::TestObjectOptions {
+        #[cfg(feature = "rdma")]
+        rdma: rdma_provider,
+        ..opts
+    };
+    commands::test_object::test_object(client, opts).await
+}
+
+async fn dispatch_perf_object_operation(
+    client: &aws_sdk_s3::Client,
+    operation: PerfObjectOp,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match operation {
+        PerfObjectOp::Put {
+            path,
+            size,
+            objects,
+            duration,
+            threads,
+            part_size,
+            disable_multipart,
+            json,
+        } => {
+            let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+            commands::perf_object::run_put(
+                client,
+                commands::perf_object::PerfPutOptions {
+                    bucket,
+                    prefix,
+                    size,
+                    objects,
+                    duration_secs: duration,
+                    threads,
+                    part_size,
+                    disable_multipart,
+                    json,
+                },
+            )
+            .await
+        }
+        PerfObjectOp::Get {
+            path,
+            objects,
+            duration,
+            threads,
+            json,
+        } => {
+            let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+            commands::perf_object::run_get(
+                client,
+                commands::perf_object::PerfGetOptions {
+                    bucket,
+                    prefix,
+                    objects,
+                    duration_secs: duration,
+                    threads,
+                    json,
+                },
+            )
+            .await
+        }
+        PerfObjectOp::List {
+            path,
+            objects,
+            duration,
+            json,
+        } => {
+            let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+            commands::perf_object::run_list(
+                client,
+                commands::perf_object::PerfListOptions {
+                    bucket,
+                    prefix,
+                    objects,
+                    duration_secs: duration,
+                    json,
+                },
+            )
+            .await
+        }
+        PerfObjectOp::Delete {
+            path,
+            objects,
+            duration,
+            threads,
+            json,
+        } => {
+            let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
+            commands::perf_object::run_delete(
+                client,
+                commands::perf_object::PerfDeleteOptions {
+                    bucket,
+                    prefix,
+                    objects,
+                    duration_secs: duration,
+                    threads,
+                    json,
+                },
+            )
+            .await
+        }
     }
 }
 
@@ -635,7 +771,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(feature = "rdma")]
     let rdma_provider: Option<std::sync::Arc<dyn rdma::RdmaClientProvider>> =
         match &client_config_clone.rdma_provider {
-            Some(p) => match rdma::RdmaProviderConfig::builder().provider(p).debug(client_config_clone.debug).build_client() {
+            Some(p) => match rdma::RdmaProviderConfig::builder()
+                .provider(p)
+                .debug(client_config_clone.debug)
+                .build_client()
+            {
                 Ok(provider) => Some(provider),
                 Err(e) => {
                     eprintln!(
@@ -679,15 +819,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             disable_multipart,
             part_size,
         } => {
-            let sse_config = commands::cp::SseConfig {
+            let sse_config = build_sse_config(
                 sse,
                 sse_kms_key_id,
                 sse_c,
                 sse_c_key,
                 sse_c_copy_source,
                 sse_c_copy_source_key,
-            };
-            let (threshold, chunksize) = resolve_multipart(
+            );
+            let multipart = resolve_multipart(
                 disable_multipart,
                 part_size,
                 client_config_clone.multipart_threshold,
@@ -697,15 +837,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &client,
                 &source,
                 &dest,
-                recursive,
-                include,
-                exclude,
-                checksum,
-                sse_config,
-                threshold,
-                chunksize,
-                #[cfg(feature = "rdma")]
-                rdma_provider,
+                commands::cp::CopyOptions {
+                    recursive,
+                    include,
+                    exclude,
+                    checksum,
+                    sse: sse_config,
+                    multipart,
+                    #[cfg(feature = "rdma")]
+                    rdma: rdma_provider,
+                },
             )
             .await
         }
@@ -725,15 +866,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             disable_multipart,
             part_size,
         } => {
-            let sse_config = commands::cp::SseConfig {
+            let sse_config = build_sse_config(
                 sse,
                 sse_kms_key_id,
                 sse_c,
                 sse_c_key,
                 sse_c_copy_source,
                 sse_c_copy_source_key,
-            };
-            let (threshold, chunksize) = resolve_multipart(
+            );
+            let multipart = resolve_multipart(
                 disable_multipart,
                 part_size,
                 client_config_clone.multipart_threshold,
@@ -743,15 +884,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &client,
                 &source,
                 &dest,
-                include,
-                exclude,
-                checksum,
-                delete,
-                sse_config,
-                threshold,
-                chunksize,
-                #[cfg(feature = "rdma")]
-                rdma_provider,
+                commands::sync::SyncOptions {
+                    include,
+                    exclude,
+                    checksum,
+                    delete,
+                    sse: sse_config,
+                    multipart,
+                    #[cfg(feature = "rdma")]
+                    rdma: rdma_provider,
+                },
             )
             .await
         }
@@ -770,15 +912,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             disable_multipart,
             part_size,
         } => {
-            let sse_config = commands::cp::SseConfig {
+            let sse_config = build_sse_config(
                 sse,
                 sse_kms_key_id,
                 sse_c,
                 sse_c_key,
                 sse_c_copy_source,
                 sse_c_copy_source_key,
-            };
-            let (threshold, chunksize) = resolve_multipart(
+            );
+            let multipart = resolve_multipart(
                 disable_multipart,
                 part_size,
                 client_config_clone.multipart_threshold,
@@ -788,14 +930,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &client,
                 &source,
                 &dest,
-                recursive,
-                include,
-                exclude,
-                sse_config,
-                threshold,
-                chunksize,
-                #[cfg(feature = "rdma")]
-                rdma_provider,
+                commands::mv::MoveOptions {
+                    recursive,
+                    include,
+                    exclude,
+                    sse: sse_config,
+                    multipart,
+                    #[cfg(feature = "rdma")]
+                    rdma: rdma_provider,
+                },
             )
             .await
         }
@@ -841,13 +984,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             commands::cat::cat(
                 &client,
                 &path,
-                range,
-                offset,
-                size,
-                part_number,
-                version_id,
-                #[cfg(feature = "rdma")]
-                rdma_provider,
+                commands::cat::CatOptions {
+                    range,
+                    offset,
+                    size,
+                    part_number,
+                    version_id,
+                    #[cfg(feature = "rdma")]
+                    rdma: rdma_provider,
+                },
             )
             .await
         }
@@ -866,15 +1011,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &client,
                 &path1,
                 &path2,
-                &algorithm,
-                range,
-                offset,
-                size,
-                sse_c,
-                sse_c_key,
-                json,
-                #[cfg(feature = "rdma")]
-                rdma_provider,
+                commands::cmp::CmpOptions {
+                    algorithm,
+                    range,
+                    offset,
+                    size,
+                    sse_c,
+                    sse_c_key,
+                    json,
+                    #[cfg(feature = "rdma")]
+                    rdma: rdma_provider,
+                },
             )
             .await
         }
@@ -903,17 +1050,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     json,
                 },
         } => {
-            commands::test_object::test_object(
+            dispatch_test_object(
                 &client,
-                &bucket,
-                key.as_deref(),
-                file.as_deref(),
-                bytes,
-                chunk_size,
-                part_size,
-                &policy,
-                keep,
-                json,
+                commands::test_object::TestObjectOptions {
+                    bucket,
+                    key,
+                    file,
+                    bytes,
+                    chunk_size,
+                    part_size,
+                    policy,
+                    keep,
+                    json,
+                    #[cfg(feature = "rdma")]
+                    rdma: None,
+                },
                 #[cfg(feature = "rdma")]
                 rdma_provider,
             )
@@ -921,68 +1072,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Commands::Perf {
             subcommand: PerfSubcommand::Object { operation },
-        } => match operation {
-            PerfObjectOp::Put {
-                path,
-                size,
-                objects,
-                duration,
-                threads,
-                part_size,
-                disable_multipart,
-                json,
-            } => {
-                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
-                commands::perf_object::run_put(
-                    &client,
-                    &bucket,
-                    &prefix,
-                    size,
-                    objects,
-                    duration,
-                    threads,
-                    part_size,
-                    disable_multipart,
-                    json,
-                )
-                .await
-            }
-            PerfObjectOp::Get {
-                path,
-                objects,
-                duration,
-                threads,
-                json,
-            } => {
-                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
-                commands::perf_object::run_get(
-                    &client, &bucket, &prefix, objects, duration, threads, json,
-                )
-                .await
-            }
-            PerfObjectOp::List {
-                path,
-                objects,
-                duration,
-                json,
-            } => {
-                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
-                commands::perf_object::run_list(&client, &bucket, &prefix, objects, duration, json)
-                    .await
-            }
-            PerfObjectOp::Delete {
-                path,
-                objects,
-                duration,
-                threads,
-                json,
-            } => {
-                let (bucket, prefix) = parse_s3_path_for_perf(&path)?;
-                commands::perf_object::run_delete(
-                    &client, &bucket, &prefix, objects, duration, threads, json,
-                )
-                .await
-            }
-        },
+        } => dispatch_perf_object_operation(&client, operation).await,
     }
 }

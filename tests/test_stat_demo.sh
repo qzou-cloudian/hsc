@@ -48,7 +48,10 @@ $HSTEST stat "$TEST_DIR" --recursive
 echo ""
 
 echo -e "${GREEN}Test 7: Recursive stat with SHA1 checksums${NC}"
-$HSTEST stat "$TEST_DIR" --recursive --checksum SHA1 | head -40
+STAT_RECURSIVE_OUTPUT=$(mktemp)
+$HSTEST stat "$TEST_DIR" --recursive --checksum SHA1 > "$STAT_RECURSIVE_OUTPUT"
+head -40 "$STAT_RECURSIVE_OUTPUT"
+rm -f "$STAT_RECURSIVE_OUTPUT"
 echo ""
 
 echo -e "${GREEN}Test 8: Stat on nested directory (recursive)${NC}"
@@ -81,8 +84,21 @@ else
 fi
 echo ""
 
+# Verify CRC32C calculation matches hash command
+echo -e "${GREEN}Test 11: Verify CRC32C checksum${NC}"
+EXPECTED_CRC32C=$($HSTEST hash "$TEST_DIR/file1.txt" --algorithm CRC32C | awk '{print $2}')
+CRC32C=$($HSTEST stat "$TEST_DIR/file1.txt" --checksum CRC32C | grep "CRC32C" | awk '{print $3}')
+echo "Expected CRC32C: $EXPECTED_CRC32C"
+echo "Calculated CRC32C: $CRC32C"
+if [ "$EXPECTED_CRC32C" = "$CRC32C" ]; then
+    echo -e "${GREEN}✓ CRC32C matches${NC}"
+else
+    echo "✗ CRC32C does NOT match"
+    exit 1
+fi
+echo ""
+
 # Clean up
 rm -rf "$TEST_DIR"
 
 echo -e "${GREEN}=== All stat tests completed successfully ===${NC}"
-

@@ -2,8 +2,10 @@
 
 ## Installation
 ```bash
-cargo install hsc
+cargo build --release
 ```
+
+Prebuilt binaries/packages come from the release workflow. `cargo install hsc` is not currently the supported path because the optional RDMA feature depends on a local `s3-rdma` crate.
 
 ## Common Commands
 

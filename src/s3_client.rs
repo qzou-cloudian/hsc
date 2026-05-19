@@ -150,7 +150,9 @@ impl Service<Name> for CustomDnsResolver {
         if let Some(&ip) = self.overrides.get(&host) {
             // Return the overridden IP; port 0 is a placeholder — Hyper sets the
             // real port from the request URI before connecting.
-            Box::pin(std::future::ready(Ok(vec![SocketAddr::new(ip, 0)].into_iter())))
+            Box::pin(std::future::ready(Ok(
+                vec![SocketAddr::new(ip, 0)].into_iter()
+            )))
         } else {
             // Fall back to system DNS.
             let host_str = name.as_str().to_owned();
@@ -174,9 +176,9 @@ impl Service<Name> for CustomDnsResolver {
 /// is not stored — DNS resolution applies to all ports for the given hostname.
 /// IPv6 addresses may be wrapped in brackets (e.g. `[::1]`).
 fn parse_resolve_entry(entry: &str) -> Result<(String, IpAddr), String> {
-    let first = entry.find(':').ok_or_else(|| {
-        format!("invalid --resolve entry '{}': expected HOST:PORT:IP", entry)
-    })?;
+    let first = entry
+        .find(':')
+        .ok_or_else(|| format!("invalid --resolve entry '{}': expected HOST:PORT:IP", entry))?;
     let second = entry[first + 1..]
         .find(':')
         .map(|p| first + 1 + p)
@@ -192,12 +194,9 @@ fn parse_resolve_entry(entry: &str) -> Result<(String, IpAddr), String> {
             entry
         ));
     }
-    port_str.parse::<u16>().map_err(|_| {
-        format!(
-            "invalid port '{}' in --resolve entry '{}'",
-            port_str, entry
-        )
-    })?;
+    port_str
+        .parse::<u16>()
+        .map_err(|_| format!("invalid port '{}' in --resolve entry '{}'", port_str, entry))?;
     // Strip optional IPv6 brackets: [::1] → ::1
     let ip_str = ip_str.trim_matches(|c| c == '[' || c == ']');
     let ip = ip_str.parse::<IpAddr>().map_err(|_| {

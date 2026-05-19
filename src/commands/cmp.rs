@@ -1,5 +1,8 @@
-use crate::commands::cp::sse_c_key_md5;
 use crate::commands::hash::{compute_hash_for_path, HashOutput};
+use crate::commands::range::{build_range_header, parse_range_options, RangeErrorStyle};
+use crate::commands::transfer::{
+    apply_sse_customer_to_get_object, apply_sse_customer_to_head_object, sse_customer_headers,
+};
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
 use serde::Serialize;
@@ -8,12 +11,13 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[cfg(feature = "rdma")]
-use crate::rdma::{RdmaInterceptor, RdmaClientProvider, RdmaClientChannel};
-#[cfg(feature = "rdma")]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use crate::commands::transfer::{
+    bind_rdma_channel, prepare_rdma_get_single, send_get_with_optional_rdma_to_vec,
 };
+#[cfg(feature = "rdma")]
+use crate::rdma::RdmaClientProvider;
+#[cfg(feature = "rdma")]
+use std::sync::Arc;
 
 const CHUNK_SIZE: usize = 65536; // 64 KiB read buffer
 
@@ -56,32 +60,49 @@ struct CmpHashPair {
     path2: HashOutput,
 }
 
-#[allow(clippy::too_many_arguments)]
+pub struct CmpOptions {
+    pub algorithm: String,
+    pub range: Option<String>,
+    pub offset: Option<u64>,
+    pub size: Option<u64>,
+    pub sse_c: Option<String>,
+    pub sse_c_key: Option<String>,
+    pub json: bool,
+    #[cfg(feature = "rdma")]
+    pub rdma: Option<Arc<dyn RdmaClientProvider>>,
+}
+
+pub struct CompareOptions {
+    pub range: Option<String>,
+    pub offset: Option<u64>,
+    pub size: Option<u64>,
+    pub sse_c: Option<String>,
+    pub sse_c_key: Option<String>,
+    #[cfg(feature = "rdma")]
+    pub rdma: Option<Arc<dyn RdmaClientProvider>>,
+}
+
 pub async fn cmp(
     client: &Client,
     path1: &str,
     path2: &str,
-    algorithm: &str,
-    range: Option<String>,
-    offset: Option<u64>,
-    size: Option<u64>,
-    sse_c: Option<String>,
-    sse_c_key: Option<String>,
-    json: bool,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaClientProvider>>,
+    opts: CmpOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let has_range = range.is_some() || offset.is_some() || size.is_some();
+    let has_range = opts.range.is_some() || opts.offset.is_some() || opts.size.is_some();
+    let algorithm = opts.algorithm;
     let compare = compare_paths(
         client,
         path1,
         path2,
-        range,
-        offset,
-        size,
-        sse_c,
-        sse_c_key,
-        #[cfg(feature = "rdma")]
-        rdma,
+        CompareOptions {
+            range: opts.range,
+            offset: opts.offset,
+            size: opts.size,
+            sse_c: opts.sse_c,
+            sse_c_key: opts.sse_c_key,
+            #[cfg(feature = "rdma")]
+            rdma: opts.rdma,
+        },
     )
     .await?;
 
@@ -89,8 +110,8 @@ pub async fn cmp(
     let hash = if compare.identical && !has_range {
         Some(CmpHashPair {
             algorithm: algorithm.to_ascii_uppercase(),
-            path1: compute_hash_for_path(client, path1, algorithm).await?,
-            path2: compute_hash_for_path(client, path2, algorithm).await?,
+            path1: compute_hash_for_path(client, path1, &algorithm).await?,
+            path2: compute_hash_for_path(client, path2, &algorithm).await?,
         })
     } else {
         None
@@ -102,7 +123,7 @@ pub async fn cmp(
         hash,
     };
 
-    if json {
+    if opts.json {
         println!("{}", serde_json::to_string_pretty(&output)?);
     } else if output.identical {
         println!("identical: true");
@@ -149,33 +170,29 @@ fn print_difference(difference: &CompareDifference) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub async fn compare_paths(
     client: &Client,
     path1: &str,
     path2: &str,
-    range: Option<String>,
-    offset: Option<u64>,
-    size: Option<u64>,
-    sse_c: Option<String>,
-    sse_c_key: Option<String>,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaClientProvider>>,
+    opts: CompareOptions,
 ) -> Result<CompareReport, Box<dyn std::error::Error>> {
-    if range.is_some() && (offset.is_some() || size.is_some()) {
+    if opts.range.is_some() && (opts.offset.is_some() || opts.size.is_some()) {
         return Err("Cannot specify both --range and --offset/--size".into());
     }
 
-    let (start, limit) = resolve_range(range, offset, size)?;
+    let byte_range = parse_range_options(opts.range, opts.offset, opts.size, RangeErrorStyle::Cmp)?;
+    let start = byte_range.start;
+    let limit = byte_range.len;
 
     let mut reader1 = open_reader(
         client,
         path1,
         start,
         limit,
-        sse_c.as_deref(),
-        sse_c_key.as_deref(),
+        opts.sse_c.as_deref(),
+        opts.sse_c_key.as_deref(),
         #[cfg(feature = "rdma")]
-        rdma.as_ref().map(Arc::clone),
+        opts.rdma.as_ref().map(Arc::clone),
     )
     .await?;
     let mut reader2 = open_reader(
@@ -183,10 +200,10 @@ pub async fn compare_paths(
         path2,
         start,
         limit,
-        sse_c.as_deref(),
-        sse_c_key.as_deref(),
+        opts.sse_c.as_deref(),
+        opts.sse_c_key.as_deref(),
         #[cfg(feature = "rdma")]
-        rdma,
+        opts.rdma,
     )
     .await?;
 
@@ -299,37 +316,6 @@ pub async fn compare_paths(
     })
 }
 
-fn resolve_range(
-    range: Option<String>,
-    offset: Option<u64>,
-    size: Option<u64>,
-) -> Result<(Option<u64>, Option<u64>), Box<dyn std::error::Error>> {
-    if let Some(range_str) = range {
-        let part = range_str.strip_prefix("bytes=").unwrap_or(&range_str);
-        let parts: Vec<&str> = part.split('-').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid range '{}', expected 'start-end'", range_str).into());
-        }
-        let start = parts[0]
-            .parse::<u64>()
-            .map_err(|_| format!("Invalid range start '{}'", parts[0]))?;
-        let limit = if parts[1].is_empty() {
-            None
-        } else {
-            let end = parts[1]
-                .parse::<u64>()
-                .map_err(|_| format!("Invalid range end '{}'", parts[1]))?;
-            if end < start {
-                return Err("Range end must be >= start".into());
-            }
-            Some(end - start + 1)
-        };
-        Ok((Some(start), limit))
-    } else {
-        Ok((offset, size))
-    }
-}
-
 fn count_lines(buf: &[u8]) -> u64 {
     buf.iter().filter(|&&b| b == b'\n').count() as u64
 }
@@ -378,13 +364,10 @@ async fn open_reader(
 
             let total_size = if limit.is_none() {
                 let mut head_req = client.head_object().bucket(&bucket).key(&key);
-                if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
-                    let md5 = sse_c_key_md5(key_b64)?;
-                    head_req = head_req
-                        .sse_customer_algorithm(algo)
-                        .sse_customer_key(key_b64)
-                        .sse_customer_key_md5(md5);
-                }
+                head_req = apply_sse_customer_to_head_object(
+                    head_req,
+                    sse_customer_headers(sse_c, sse_c_key)?,
+                );
                 let head = head_req
                     .send()
                     .await
@@ -396,68 +379,21 @@ async fn open_reader(
 
             #[cfg_attr(not(feature = "rdma"), allow(unused_variables))]
             let byte_count = limit.unwrap_or(total_size) as usize;
-            let range_hdr = build_range_header(start, limit);
+            let range_hdr =
+                build_range_header(crate::commands::range::ByteRange { start, len: limit });
 
             #[cfg(feature = "rdma")]
             if let Some(ref provider) = rdma {
                 let s3_key = format!("{}/{}", bucket, key);
-                // Provider allocates and registers the buffer.
-                let maybe_channel: Option<Arc<dyn RdmaClientChannel>> = if byte_count > 0 {
-                    match provider.bind(byte_count, s3_key.as_bytes()) {
-                        Ok(ch) => Some(Arc::from(ch)),
-                        Err(e) => {
-                            eprintln!("[rdma] bind failed ({e}); falling back to plain HTTP");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let maybe_rdma: Option<(Vec<u8>, Vec<crate::rdma::RdmaTransferHandle>)> =
-                    if let Some(ref channel) = maybe_channel {
-                        match channel.prepare_get(0, byte_count) {
-                            Ok(h) => Some((h.token().to_vec(), vec![h])),
-                            Err(e) => {
-                                eprintln!("[rdma] prepare_get failed ({e}); falling back to plain HTTP");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                let rdma_attempted = maybe_rdma.is_some();
+                let maybe_rdma = bind_rdma_channel(provider, byte_count, s3_key.as_bytes())
+                    .and_then(|channel| prepare_rdma_get_single(&channel, byte_count));
                 let mut req = client.get_object().bucket(&bucket).key(&key);
                 if let Some(ref r) = range_hdr {
                     req = req.range(r.clone());
                 }
-                let rdma_confirmed = Arc::new(AtomicBool::new(false));
-                let resp = if let Some((token, handles)) = maybe_rdma {
-                    let channel_arc = maybe_channel.as_ref().unwrap().clone();
-                    let interceptor = RdmaInterceptor::new_get(
-                        channel_arc,
-                        token,
-                        handles,
-                        byte_count,
-                        Arc::clone(&rdma_confirmed),
-                        false,
-                    );
-                    req.customize().interceptor(interceptor).send().await?
-                } else {
-                    req.send().await?
-                };
-                let bytes = if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
-                    // Data was written into the channel buffer by complete_get.
-                    let buf = unsafe {
-                        std::slice::from_raw_parts(
-                            maybe_channel.as_ref().unwrap().ptr(),
-                            maybe_channel.as_ref().unwrap().size(),
-                        )
-                    };
-                    buf[..byte_count].to_vec()
-                } else {
-                    resp.body.collect().await?.into_bytes().to_vec()
-                };
-                // maybe_channel dropped here → deregisters memory.
+                req =
+                    apply_sse_customer_to_get_object(req, sse_customer_headers(sse_c, sse_c_key)?);
+                let bytes = send_get_with_optional_rdma_to_vec(req, maybe_rdma, byte_count).await?;
                 return Ok(Reader {
                     inner: ReaderInner::S3 {
                         data: bytes,
@@ -471,13 +407,7 @@ async fn open_reader(
             if let Some(r) = range_hdr {
                 req = req.range(r);
             }
-            if let (Some(algo), Some(key_b64)) = (sse_c, sse_c_key) {
-                let md5 = sse_c_key_md5(key_b64)?;
-                req = req
-                    .sse_customer_algorithm(algo)
-                    .sse_customer_key(key_b64)
-                    .sse_customer_key_md5(md5);
-            }
+            req = apply_sse_customer_to_get_object(req, sse_customer_headers(sse_c, sse_c_key)?);
             let resp = req.send().await?;
             let bytes = resp.body.collect().await?.into_bytes().to_vec();
             Ok(Reader {
@@ -488,14 +418,6 @@ async fn open_reader(
                 total_size,
             })
         }
-    }
-}
-
-fn build_range_header(start: Option<u64>, limit: Option<u64>) -> Option<String> {
-    match (start, limit) {
-        (Some(s), Some(l)) => Some(format!("bytes={}-{}", s, s + l - 1)),
-        (Some(s), None) => Some(format!("bytes={}-", s)),
-        _ => None,
     }
 }
 

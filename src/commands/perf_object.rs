@@ -7,7 +7,9 @@ use aws_sdk_s3::Client;
 use serde::Serialize;
 use tokio::sync::Semaphore;
 
-use super::cp::{upload_file, SseConfig};
+use super::cp::{upload_file, UploadOptions};
+use super::listing::list_s3_keys_limited;
+use super::transfer::{MultipartConfig, SseConfig};
 
 // ── Random data generator ─────────────────────────────────────────────────────
 
@@ -83,47 +85,89 @@ struct BenchmarkResult {
     latency_ms: LatencyStats,
 }
 
-// ── List helper: collect up to `limit` keys under a prefix ───────────────────
-
-async fn list_keys(
-    client: &Client,
-    bucket: &str,
-    prefix: &str,
-    limit: u64,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut keys = Vec::new();
-    let mut continuation_token: Option<String> = None;
-
-    loop {
-        let remaining = limit - keys.len() as u64;
-        let page_size = remaining.min(1000) as i32;
-
-        let mut req = client.list_objects_v2().bucket(bucket).max_keys(page_size);
-        if !prefix.is_empty() {
-            req = req.prefix(prefix);
-        }
-        if let Some(token) = continuation_token.take() {
-            req = req.continuation_token(token);
-        }
-
-        let resp = req.send().await?;
-        for obj in resp.contents() {
-            if let Some(k) = obj.key() {
-                keys.push(k.to_string());
-                if keys.len() as u64 >= limit {
-                    return Ok(keys);
-                }
-            }
-        }
-
-        if resp.is_truncated().unwrap_or(false) {
-            continuation_token = resp.next_continuation_token().map(str::to_string);
-        } else {
-            break;
+impl BenchmarkResult {
+    fn new(
+        operation: &str,
+        bucket: String,
+        prefix: String,
+        workers: usize,
+        object_size_bytes: Option<u64>,
+        metrics: BenchmarkMetrics,
+    ) -> Self {
+        Self {
+            operation: operation.to_string(),
+            bucket,
+            prefix,
+            workers,
+            object_size_bytes,
+            operations_completed: metrics.ops,
+            elapsed_secs: metrics.elapsed_secs,
+            ops_per_sec: metrics.ops_per_sec,
+            mb_per_sec: metrics.mb_per_sec,
+            latency_ms: metrics.latency,
         }
     }
+}
 
-    Ok(keys)
+struct BenchmarkMetrics {
+    ops: u64,
+    elapsed_secs: f64,
+    ops_per_sec: f64,
+    mb_per_sec: Option<f64>,
+    latency: LatencyStats,
+}
+
+fn benchmark_mode_label(objects: Option<u64>, duration_secs: Option<u64>) -> String {
+    objects
+        .map(|n| format!("objects={}", n))
+        .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
+        .unwrap_or_default()
+}
+
+fn benchmark_deadline(duration_secs: Option<u64>) -> Option<Instant> {
+    duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s))
+}
+
+fn calculate_ops_per_sec(ops: u64, elapsed_secs: f64) -> f64 {
+    if elapsed_secs > 0.0 {
+        ops as f64 / elapsed_secs
+    } else {
+        0.0
+    }
+}
+
+fn benchmark_metrics(
+    ops: u64,
+    elapsed_secs: f64,
+    latencies: Vec<f64>,
+    mb_per_sec: Option<f64>,
+) -> BenchmarkMetrics {
+    BenchmarkMetrics {
+        ops,
+        elapsed_secs,
+        ops_per_sec: calculate_ops_per_sec(ops, elapsed_secs),
+        mb_per_sec,
+        latency: compute_latency_stats(latencies),
+    }
+}
+
+fn print_benchmark_results(metrics: &BenchmarkMetrics) {
+    eprintln!();
+    println!("\nResults:");
+    println!("  Operations:  {}", metrics.ops);
+    println!("  Elapsed:     {:.1}s", metrics.elapsed_secs);
+    if let Some(mb) = metrics.mb_per_sec {
+        println!(
+            "  Throughput:  {:.2} ops/s   {:.1} MB/s",
+            metrics.ops_per_sec, mb
+        );
+    } else {
+        println!("  Throughput:  {:.2} ops/s", metrics.ops_per_sec);
+    }
+    println!(
+        "  Latency:     min={:.0}ms  avg={:.0}ms  max={:.0}ms  p99={:.0}ms",
+        metrics.latency.min, metrics.latency.avg, metrics.latency.max, metrics.latency.p99
+    );
 }
 
 // ── Progress line printer ─────────────────────────────────────────────────────
@@ -138,50 +182,80 @@ fn print_progress(completed: u64, total: Option<u64>) {
 
 // ── PUT benchmark ─────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+pub struct PerfPutOptions {
+    pub bucket: String,
+    pub prefix: String,
+    pub size: u64,
+    pub objects: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub threads: usize,
+    pub part_size: u64,
+    pub disable_multipart: bool,
+    pub json: bool,
+}
+
+pub struct PerfGetOptions {
+    pub bucket: String,
+    pub prefix: String,
+    pub objects: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub threads: usize,
+    pub json: bool,
+}
+
+pub struct PerfListOptions {
+    pub bucket: String,
+    pub prefix: String,
+    pub objects: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub json: bool,
+}
+
+pub struct PerfDeleteOptions {
+    pub bucket: String,
+    pub prefix: String,
+    pub objects: Option<u64>,
+    pub duration_secs: Option<u64>,
+    pub threads: usize,
+    pub json: bool,
+}
+
 pub async fn run_put(
     client: &Client,
-    bucket: &str,
-    prefix: &str,
-    size: u64,
-    objects: Option<u64>,
-    duration_secs: Option<u64>,
-    threads: usize,
-    part_size: u64,
-    disable_multipart: bool,
-    json: bool,
+    opts: PerfPutOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !json {
+    if !opts.json {
         println!(
             "PUT benchmark: s3://{}/{}  size={} B  threads={}  {}",
-            bucket,
-            prefix,
-            size,
-            threads,
-            objects
-                .map(|n| format!("objects={}", n))
-                .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
-                .unwrap_or_default()
+            opts.bucket,
+            opts.prefix,
+            opts.size,
+            opts.threads,
+            benchmark_mode_label(opts.objects, opts.duration_secs)
         );
     }
 
     // Generate random data once; clone/re-use per task.
-    let data = Arc::new(generate_random_data(size));
+    let data = Arc::new(generate_random_data(opts.size));
     let epoch_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
 
-    let multipart_threshold = if disable_multipart {
+    let multipart_threshold = if opts.disable_multipart {
         u64::MAX
     } else {
-        part_size
+        opts.part_size
+    };
+    let multipart = MultipartConfig {
+        threshold: multipart_threshold,
+        chunksize: opts.part_size,
     };
     let sse = SseConfig::default();
 
-    let sem = Arc::new(Semaphore::new(threads));
+    let sem = Arc::new(Semaphore::new(opts.threads));
     let counter = Arc::new(AtomicU64::new(0));
-    let deadline = duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s));
+    let deadline = benchmark_deadline(opts.duration_secs);
 
     let mut latencies: Vec<f64> = Vec::new();
     let mut tasks = tokio::task::JoinSet::new();
@@ -190,7 +264,7 @@ pub async fn run_put(
 
     loop {
         // Check stop condition
-        let done = match (objects, deadline) {
+        let done = match (opts.objects, deadline) {
             (Some(n), _) => counter.load(Ordering::Relaxed) >= n,
             (_, Some(dl)) => Instant::now() >= dl,
             (None, None) => false,
@@ -200,7 +274,7 @@ pub async fn run_put(
         }
 
         // Check if we've dispatched enough tasks (objects mode)
-        if let Some(n) = objects {
+        if let Some(n) = opts.objects {
             if idx >= n {
                 break;
             }
@@ -209,10 +283,11 @@ pub async fn run_put(
         let permit = sem.clone().acquire_owned().await?;
         let client_ref = client.clone();
         let data_ref = Arc::clone(&data);
-        let bucket_s = bucket.to_string();
-        let prefix_s = prefix.to_string();
+        let bucket_s = opts.bucket.clone();
+        let prefix_s = opts.prefix.clone();
         let counter_ref = Arc::clone(&counter);
         let sse_clone = sse.clone();
+        let multipart_config = multipart;
 
         let key = if prefix_s.is_empty() {
             format!("hsc-perf-{:06}-{}", idx, epoch_ms)
@@ -242,13 +317,14 @@ pub async fn run_put(
                 tmp_path.to_str().unwrap(),
                 &bucket_s,
                 &key,
-                None,
-                None,
-                &sse_clone,
-                multipart_threshold,
-                part_size,
-                #[cfg(feature = "rdma")]
-                None,
+                UploadOptions {
+                    checksum_mode: None,
+                    checksum_algorithm: None,
+                    sse: &sse_clone,
+                    multipart: multipart_config,
+                    #[cfg(feature = "rdma")]
+                    rdma: None,
+                },
             )
             .await
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() });
@@ -266,8 +342,8 @@ pub async fn run_put(
             match res {
                 Ok(Ok(lat)) => {
                     latencies.push(lat);
-                    if !json {
-                        print_progress(counter.load(Ordering::Relaxed), objects);
+                    if !opts.json {
+                        print_progress(counter.load(Ordering::Relaxed), opts.objects);
                     }
                 }
                 Ok(Err(e)) => eprintln!("\nPUT error: {}", e),
@@ -281,8 +357,8 @@ pub async fn run_put(
         match res {
             Ok(Ok(lat)) => {
                 latencies.push(lat);
-                if !json {
-                    print_progress(counter.load(Ordering::Relaxed), objects);
+                if !opts.json {
+                    print_progress(counter.load(Ordering::Relaxed), opts.objects);
                 }
             }
             Ok(Err(e)) => eprintln!("\nPUT error: {}", e),
@@ -292,41 +368,22 @@ pub async fn run_put(
 
     let elapsed = wall_start.elapsed().as_secs_f64();
     let ops = counter.load(Ordering::Relaxed);
-    let ops_per_sec = if elapsed > 0.0 {
-        ops as f64 / elapsed
-    } else {
-        0.0
-    };
-    let mb_per_sec = ops_per_sec * size as f64 / (1024.0 * 1024.0);
-    let stats = compute_latency_stats(latencies);
+    let ops_per_sec = calculate_ops_per_sec(ops, elapsed);
+    let mb_per_sec = ops_per_sec * opts.size as f64 / (1024.0 * 1024.0);
+    let metrics = benchmark_metrics(ops, elapsed, latencies, Some(mb_per_sec));
 
-    if json {
-        let result = BenchmarkResult {
-            operation: "put".to_string(),
-            bucket: bucket.to_string(),
-            prefix: prefix.to_string(),
-            workers: threads,
-            object_size_bytes: Some(size),
-            operations_completed: ops,
-            elapsed_secs: elapsed,
-            ops_per_sec,
-            mb_per_sec: Some(mb_per_sec),
-            latency_ms: stats,
-        };
+    if opts.json {
+        let result = BenchmarkResult::new(
+            "put",
+            opts.bucket,
+            opts.prefix,
+            opts.threads,
+            Some(opts.size),
+            metrics,
+        );
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        eprintln!();
-        println!("\nResults:");
-        println!("  Operations:  {}", ops);
-        println!("  Elapsed:     {:.1}s", elapsed);
-        println!(
-            "  Throughput:  {:.2} ops/s   {:.1} MB/s",
-            ops_per_sec, mb_per_sec
-        );
-        println!(
-            "  Latency:     min={:.0}ms  avg={:.0}ms  max={:.0}ms  p99={:.0}ms",
-            stats.min, stats.avg, stats.max, stats.p99
-        );
+        print_benchmark_results(&metrics);
     }
 
     Ok(())
@@ -336,40 +393,32 @@ pub async fn run_put(
 
 pub async fn run_get(
     client: &Client,
-    bucket: &str,
-    prefix: &str,
-    objects: Option<u64>,
-    duration_secs: Option<u64>,
-    threads: usize,
-    json: bool,
+    opts: PerfGetOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let limit = objects.unwrap_or(100);
+    let limit = opts.objects.unwrap_or(100);
 
-    if !json {
+    if !opts.json {
         println!(
             "GET benchmark: s3://{}/{}  threads={}  {}",
-            bucket,
-            prefix,
-            threads,
-            objects
-                .map(|n| format!("objects={}", n))
-                .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
-                .unwrap_or_default()
+            opts.bucket,
+            opts.prefix,
+            opts.threads,
+            benchmark_mode_label(opts.objects, opts.duration_secs)
         );
         eprintln!("  Listing objects...");
     }
 
-    let keys = list_keys(client, bucket, prefix, limit).await?;
+    let keys = list_s3_keys_limited(client, &opts.bucket, &opts.prefix, limit).await?;
     if keys.is_empty() {
-        return Err(format!("No objects found at s3://{}/{}", bucket, prefix).into());
+        return Err(format!("No objects found at s3://{}/{}", opts.bucket, opts.prefix).into());
     }
-    if !json {
+    if !opts.json {
         eprintln!("  Found {} objects", keys.len());
     }
 
-    let sem = Arc::new(Semaphore::new(threads));
+    let sem = Arc::new(Semaphore::new(opts.threads));
     let counter = Arc::new(AtomicU64::new(0));
-    let deadline = duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s));
+    let deadline = benchmark_deadline(opts.duration_secs);
 
     let mut latencies: Vec<f64> = Vec::new();
     let mut tasks = tokio::task::JoinSet::new();
@@ -378,7 +427,7 @@ pub async fn run_get(
     let mut dispatched = 0u64;
 
     loop {
-        let done = match (objects, deadline) {
+        let done = match (opts.objects, deadline) {
             (Some(n), _) => counter.load(Ordering::Relaxed) >= n,
             (_, Some(dl)) => Instant::now() >= dl,
             (None, None) => false,
@@ -386,7 +435,7 @@ pub async fn run_get(
         if done {
             break;
         }
-        if let Some(n) = objects {
+        if let Some(n) = opts.objects {
             if dispatched >= n {
                 break;
             }
@@ -394,7 +443,7 @@ pub async fn run_get(
 
         let permit = sem.clone().acquire_owned().await?;
         let client_ref = client.clone();
-        let bucket_s = bucket.to_string();
+        let bucket_s = opts.bucket.clone();
         let key = keys[key_idx % keys.len()].clone();
         key_idx += 1;
         dispatched += 1;
@@ -429,8 +478,8 @@ pub async fn run_get(
             match res {
                 Ok(Ok((lat, _bytes))) => {
                     latencies.push(lat);
-                    if !json {
-                        print_progress(counter.load(Ordering::Relaxed), objects);
+                    if !opts.json {
+                        print_progress(counter.load(Ordering::Relaxed), opts.objects);
                     }
                 }
                 Ok(Err(e)) => eprintln!("\nGET error: {}", e),
@@ -443,8 +492,8 @@ pub async fn run_get(
         match res {
             Ok(Ok((lat, _bytes))) => {
                 latencies.push(lat);
-                if !json {
-                    print_progress(counter.load(Ordering::Relaxed), objects);
+                if !opts.json {
+                    print_progress(counter.load(Ordering::Relaxed), opts.objects);
                 }
             }
             Ok(Err(e)) => eprintln!("\nGET error: {}", e),
@@ -454,16 +503,12 @@ pub async fn run_get(
 
     let elapsed = wall_start.elapsed().as_secs_f64();
     let ops = counter.load(Ordering::Relaxed);
-    let ops_per_sec = if elapsed > 0.0 {
-        ops as f64 / elapsed
-    } else {
-        0.0
-    };
+    let ops_per_sec = calculate_ops_per_sec(ops, elapsed);
 
     // Estimate per-object size from first object's head (best-effort)
     let obj_size = match client
         .head_object()
-        .bucket(bucket)
+        .bucket(&opts.bucket)
         .key(&keys[0])
         .send()
         .await
@@ -476,36 +521,20 @@ pub async fn run_get(
     } else {
         None
     };
-    let stats = compute_latency_stats(latencies);
+    let metrics = benchmark_metrics(ops, elapsed, latencies, mb_per_sec);
 
-    if json {
-        let result = BenchmarkResult {
-            operation: "get".to_string(),
-            bucket: bucket.to_string(),
-            prefix: prefix.to_string(),
-            workers: threads,
-            object_size_bytes: if obj_size > 0 { Some(obj_size) } else { None },
-            operations_completed: ops,
-            elapsed_secs: elapsed,
-            ops_per_sec,
-            mb_per_sec,
-            latency_ms: stats,
-        };
+    if opts.json {
+        let result = BenchmarkResult::new(
+            "get",
+            opts.bucket,
+            opts.prefix,
+            opts.threads,
+            if obj_size > 0 { Some(obj_size) } else { None },
+            metrics,
+        );
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        eprintln!();
-        println!("\nResults:");
-        println!("  Operations:  {}", ops);
-        println!("  Elapsed:     {:.1}s", elapsed);
-        if let Some(mb) = mb_per_sec {
-            println!("  Throughput:  {:.2} ops/s   {:.1} MB/s", ops_per_sec, mb);
-        } else {
-            println!("  Throughput:  {:.2} ops/s", ops_per_sec);
-        }
-        println!(
-            "  Latency:     min={:.0}ms  avg={:.0}ms  max={:.0}ms  p99={:.0}ms",
-            stats.min, stats.avg, stats.max, stats.p99
-        );
+        print_benchmark_results(&metrics);
     }
 
     Ok(())
@@ -515,33 +544,26 @@ pub async fn run_get(
 
 pub async fn run_list(
     client: &Client,
-    bucket: &str,
-    prefix: &str,
-    objects: Option<u64>,
-    duration_secs: Option<u64>,
-    json: bool,
+    opts: PerfListOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if !json {
+    if !opts.json {
         println!(
             "LIST benchmark: s3://{}/{}  {}",
-            bucket,
-            prefix,
-            objects
-                .map(|n| format!("objects={}", n))
-                .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
-                .unwrap_or_default()
+            opts.bucket,
+            opts.prefix,
+            benchmark_mode_label(opts.objects, opts.duration_secs)
         );
     }
 
-    let deadline = duration_secs.map(|s| Instant::now() + std::time::Duration::from_secs(s));
-    let limit = objects.unwrap_or(100);
+    let deadline = benchmark_deadline(opts.duration_secs);
+    let limit = opts.objects.unwrap_or(100);
 
     let mut latencies: Vec<f64> = Vec::new();
     let mut ops: u64 = 0;
     let wall_start = Instant::now();
 
     loop {
-        let done = match (objects, deadline) {
+        let done = match (opts.objects, deadline) {
             (Some(n), _) => ops >= n,
             (_, Some(dl)) => Instant::now() >= dl,
             (None, None) => ops >= limit,
@@ -551,52 +573,28 @@ pub async fn run_list(
         }
 
         let t0 = Instant::now();
-        let mut req = client.list_objects_v2().bucket(bucket).max_keys(1000);
-        if !prefix.is_empty() {
-            req = req.prefix(prefix);
+        let mut req = client.list_objects_v2().bucket(&opts.bucket).max_keys(1000);
+        if !opts.prefix.is_empty() {
+            req = req.prefix(&opts.prefix);
         }
         req.send().await?;
 
         latencies.push(t0.elapsed().as_secs_f64() * 1000.0);
         ops += 1;
 
-        if !json {
-            print_progress(ops, objects);
+        if !opts.json {
+            print_progress(ops, opts.objects);
         }
     }
 
     let elapsed = wall_start.elapsed().as_secs_f64();
-    let ops_per_sec = if elapsed > 0.0 {
-        ops as f64 / elapsed
-    } else {
-        0.0
-    };
-    let stats = compute_latency_stats(latencies);
+    let metrics = benchmark_metrics(ops, elapsed, latencies, None);
 
-    if json {
-        let result = BenchmarkResult {
-            operation: "list".to_string(),
-            bucket: bucket.to_string(),
-            prefix: prefix.to_string(),
-            workers: 1,
-            object_size_bytes: None,
-            operations_completed: ops,
-            elapsed_secs: elapsed,
-            ops_per_sec,
-            mb_per_sec: None,
-            latency_ms: stats,
-        };
+    if opts.json {
+        let result = BenchmarkResult::new("list", opts.bucket, opts.prefix, 1, None, metrics);
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        eprintln!();
-        println!("\nResults:");
-        println!("  Operations:  {}", ops);
-        println!("  Elapsed:     {:.1}s", elapsed);
-        println!("  Throughput:  {:.2} ops/s", ops_per_sec);
-        println!(
-            "  Latency:     min={:.0}ms  avg={:.0}ms  max={:.0}ms  p99={:.0}ms",
-            stats.min, stats.avg, stats.max, stats.p99
-        );
+        print_benchmark_results(&metrics);
     }
 
     Ok(())
@@ -606,41 +604,33 @@ pub async fn run_list(
 
 pub async fn run_delete(
     client: &Client,
-    bucket: &str,
-    prefix: &str,
-    objects: Option<u64>,
-    duration_secs: Option<u64>,
-    threads: usize,
-    json: bool,
+    opts: PerfDeleteOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let limit = objects.unwrap_or(100);
+    let limit = opts.objects.unwrap_or(100);
 
-    if !json {
+    if !opts.json {
         println!(
             "DELETE benchmark: s3://{}/{}  threads={}  {}",
-            bucket,
-            prefix,
-            threads,
-            objects
-                .map(|n| format!("objects={}", n))
-                .or_else(|| duration_secs.map(|s| format!("duration={}s", s)))
-                .unwrap_or_default()
+            opts.bucket,
+            opts.prefix,
+            opts.threads,
+            benchmark_mode_label(opts.objects, opts.duration_secs)
         );
         eprintln!("  Listing objects...");
     }
 
-    let keys = list_keys(client, bucket, prefix, limit).await?;
+    let keys = list_s3_keys_limited(client, &opts.bucket, &opts.prefix, limit).await?;
     if keys.is_empty() {
-        return Err(format!("No objects found at s3://{}/{}", bucket, prefix).into());
+        return Err(format!("No objects found at s3://{}/{}", opts.bucket, opts.prefix).into());
     }
-    if !json {
+    if !opts.json {
         eprintln!("  Found {} objects to delete", keys.len());
     }
 
     // Batch into chunks of 1000 (S3 limit per DeleteObjects call)
     let batches: Vec<Vec<String>> = keys.chunks(1000).map(|c| c.to_vec()).collect();
 
-    let sem = Arc::new(Semaphore::new(threads));
+    let sem = Arc::new(Semaphore::new(opts.threads));
     let counter = Arc::new(AtomicU64::new(0));
     let wall_start = Instant::now();
 
@@ -650,7 +640,7 @@ pub async fn run_delete(
     for batch in batches {
         let permit = sem.clone().acquire_owned().await?;
         let client_ref = client.clone();
-        let bucket_s = bucket.to_string();
+        let bucket_s = opts.bucket.clone();
         let batch_len = batch.len() as u64;
         let counter_ref = Arc::clone(&counter);
 
@@ -683,8 +673,8 @@ pub async fn run_delete(
             match res {
                 Ok(Ok(lat)) => {
                     latencies.push(lat);
-                    if !json {
-                        print_progress(counter.load(Ordering::Relaxed), objects);
+                    if !opts.json {
+                        print_progress(counter.load(Ordering::Relaxed), opts.objects);
                     }
                 }
                 Ok(Err(e)) => eprintln!("\nDELETE error: {}", e),
@@ -697,8 +687,8 @@ pub async fn run_delete(
         match res {
             Ok(Ok(lat)) => {
                 latencies.push(lat);
-                if !json {
-                    print_progress(counter.load(Ordering::Relaxed), objects);
+                if !opts.json {
+                    print_progress(counter.load(Ordering::Relaxed), opts.objects);
                 }
             }
             Ok(Err(e)) => eprintln!("\nDELETE error: {}", e),
@@ -708,37 +698,20 @@ pub async fn run_delete(
 
     let elapsed = wall_start.elapsed().as_secs_f64();
     let ops = counter.load(Ordering::Relaxed);
-    let ops_per_sec = if elapsed > 0.0 {
-        ops as f64 / elapsed
-    } else {
-        0.0
-    };
-    let stats = compute_latency_stats(latencies);
+    let metrics = benchmark_metrics(ops, elapsed, latencies, None);
 
-    if json {
-        let result = BenchmarkResult {
-            operation: "delete".to_string(),
-            bucket: bucket.to_string(),
-            prefix: prefix.to_string(),
-            workers: threads,
-            object_size_bytes: None,
-            operations_completed: ops,
-            elapsed_secs: elapsed,
-            ops_per_sec,
-            mb_per_sec: None,
-            latency_ms: stats,
-        };
+    if opts.json {
+        let result = BenchmarkResult::new(
+            "delete",
+            opts.bucket,
+            opts.prefix,
+            opts.threads,
+            None,
+            metrics,
+        );
         println!("{}", serde_json::to_string_pretty(&result)?);
     } else {
-        eprintln!();
-        println!("\nResults:");
-        println!("  Operations:  {}", ops);
-        println!("  Elapsed:     {:.1}s", elapsed);
-        println!("  Throughput:  {:.2} ops/s", ops_per_sec);
-        println!(
-            "  Latency:     min={:.0}ms  avg={:.0}ms  max={:.0}ms  p99={:.0}ms",
-            stats.min, stats.avg, stats.max, stats.p99
-        );
+        print_benchmark_results(&metrics);
     }
 
     Ok(())

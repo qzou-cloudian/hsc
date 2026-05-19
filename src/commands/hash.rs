@@ -5,6 +5,7 @@ use md5::{Digest, Md5};
 use serde::Serialize;
 use sha1::Sha1;
 use sha2::Sha256;
+use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 
@@ -113,46 +114,67 @@ pub async fn compute_hash_for_path(
     algorithm: &str,
 ) -> Result<HashOutput, Box<dyn std::error::Error>> {
     let algorithm = HashAlgorithm::parse(algorithm)?;
-    let mut hasher = HasherState::new(algorithm);
-    let mut size = 0u64;
 
-    match parse_path(path)? {
+    let (value, size) = match parse_path(path)? {
         PathType::Local(local_path) => {
-            let mut file = fs::File::open(&local_path)
-                .await
-                .map_err(|e| format!("Cannot open '{}': {}", local_path, e))?;
-            let metadata = file.metadata().await?;
-            if !metadata.is_file() {
-                return Err(format!("'{}' is not a file", local_path).into());
-            }
-
-            let mut buffer = vec![0u8; 8192];
-            loop {
-                let n = file.read(&mut buffer).await?;
-                if n == 0 {
-                    break;
-                }
-                hasher.update(&buffer[..n]);
-                size += n as u64;
-            }
+            compute_hash_for_local_path_with_size(Path::new(&local_path), algorithm).await?
         }
         PathType::S3 { bucket, key } => {
             if key.is_empty() {
                 return Err(format!("'{}' is an S3 bucket, not an object", path).into());
             }
+            let mut hasher = HasherState::new(algorithm);
+            let mut size = 0u64;
             let response = client.get_object().bucket(&bucket).key(&key).send().await?;
             let mut body = response.body;
             while let Some(bytes) = body.try_next().await? {
                 hasher.update(&bytes);
                 size += bytes.len() as u64;
             }
+            (hasher.finalize(), size)
         }
-    }
+    };
 
     Ok(HashOutput {
         path: path.to_string(),
         algorithm: algorithm.name().to_string(),
-        value: hasher.finalize(),
+        value,
         size,
     })
+}
+
+pub async fn compute_hash_for_local_path(
+    path: &Path,
+    algorithm: HashAlgorithm,
+) -> Result<String, Box<dyn std::error::Error>> {
+    Ok(compute_hash_for_local_path_with_size(path, algorithm)
+        .await?
+        .0)
+}
+
+async fn compute_hash_for_local_path_with_size(
+    path: &Path,
+    algorithm: HashAlgorithm,
+) -> Result<(String, u64), Box<dyn std::error::Error>> {
+    let mut file = fs::File::open(path)
+        .await
+        .map_err(|e| format!("Cannot open '{}': {}", path.display(), e))?;
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() {
+        return Err(format!("'{}' is not a file", path.display()).into());
+    }
+
+    let mut hasher = HasherState::new(algorithm);
+    let mut size = 0u64;
+    let mut buffer = vec![0u8; 8192];
+    loop {
+        let n = file.read(&mut buffer).await?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+        size += n as u64;
+    }
+
+    Ok((hasher.finalize(), size))
 }

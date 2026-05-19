@@ -1,3 +1,4 @@
+use crate::commands::object_metadata::ObjectChecksums;
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::types::ObjectAttributes;
 use aws_sdk_s3::Client;
@@ -8,16 +9,8 @@ use serde::Serialize;
 struct PartEntry {
     part_number: Option<i32>,
     size: Option<i64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checksum_crc32: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checksum_crc32c: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checksum_crc64nvme: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checksum_sha1: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    checksum_sha256: Option<String>,
+    #[serde(flatten)]
+    checksums: ObjectChecksums,
 }
 
 /// Complete output structure for `hsc parts`.
@@ -101,11 +94,7 @@ async fn parts_via_get_object_attributes(
                 all_parts.push(PartEntry {
                     part_number: part.part_number(),
                     size: part.size(),
-                    checksum_crc32: part.checksum_crc32().map(str::to_string),
-                    checksum_crc32c: part.checksum_crc32_c().map(str::to_string),
-                    checksum_crc64nvme: part.checksum_crc64_nvme().map(str::to_string),
-                    checksum_sha1: part.checksum_sha1().map(str::to_string),
-                    checksum_sha256: part.checksum_sha256().map(str::to_string),
+                    checksums: ObjectChecksums::from_object_part(part),
                 });
             }
 
@@ -227,17 +216,12 @@ fn render_output(output: &PartsOutput, json: bool) -> Result<(), Box<dyn std::er
             None => println!("Parts     : 1 (single-put)"),
         }
         if !output.parts.is_empty() {
-            let has_checksums = output.parts.iter().any(|p| {
-                p.checksum_crc32.is_some()
-                    || p.checksum_crc32c.is_some()
-                    || p.checksum_crc64nvme.is_some()
-                    || p.checksum_sha1.is_some()
-                    || p.checksum_sha256.is_some()
-            });
+            let has_checksums = output.parts.iter().any(|p| p.checksums.has_any());
             println!();
             if has_checksums {
                 println!("PART\tSIZE\tCRC32\tCRC32C\tCRC64NVME\tSHA1\tSHA256");
                 for part in &output.parts {
+                    let checksums = part.checksums.table_values();
                     println!(
                         "{}\t{}\t{}\t{}\t{}\t{}\t{}",
                         part.part_number
@@ -246,11 +230,11 @@ fn render_output(output: &PartsOutput, json: bool) -> Result<(), Box<dyn std::er
                         part.size
                             .map(|v| v.to_string())
                             .unwrap_or_else(|| "-".to_string()),
-                        part.checksum_crc32.as_deref().unwrap_or("-"),
-                        part.checksum_crc32c.as_deref().unwrap_or("-"),
-                        part.checksum_crc64nvme.as_deref().unwrap_or("-"),
-                        part.checksum_sha1.as_deref().unwrap_or("-"),
-                        part.checksum_sha256.as_deref().unwrap_or("-"),
+                        checksums[0],
+                        checksums[1],
+                        checksums[2],
+                        checksums[3],
+                        checksums[4],
                     );
                 }
             } else {

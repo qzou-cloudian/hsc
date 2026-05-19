@@ -199,13 +199,7 @@ mod tests {
             extract_scheme_and_authority("http://192.168.1.5:8080"),
             Some("http://192.168.1.5:8080".to_string())
         );
-        assert_eq!(
-            extract_scheme_and_authority("not-a-url"),
-            None
-        );
-        assert_eq!(
-            extract_scheme_and_authority("http:///no-authority"),
-            None
-        );
+        assert_eq!(extract_scheme_and_authority("not-a-url"), None);
+        assert_eq!(extract_scheme_and_authority("http:///no-authority"), None);
     }
 }

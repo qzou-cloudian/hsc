@@ -1,3 +1,4 @@
+use crate::commands::listing::{list_s3_objects, walk_local_files};
 use crate::filters::FileFilter;
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
@@ -7,12 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
-use walkdir::WalkDir;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 struct FileInfo {
-    path: String,
     size: u64,
     etag: Option<String>,
 }
@@ -105,58 +103,28 @@ async fn collect_s3_files(
     _calculate_etag: bool,
 ) -> Result<HashMap<String, FileInfo>, Box<dyn std::error::Error>> {
     let mut files = HashMap::new();
-    let mut continuation_token: Option<String> = None;
 
-    loop {
-        let mut request = client.list_objects_v2().bucket(bucket);
+    for obj in list_s3_objects(client, bucket, prefix).await? {
+        let relative_key = obj.relative_key(prefix).to_string();
 
-        if !prefix.is_empty() {
-            request = request.prefix(prefix);
+        if relative_key.is_empty() {
+            continue;
         }
 
-        if let Some(token) = continuation_token {
-            request = request.continuation_token(token);
+        // Apply filters
+        if !filter.matches(&relative_key) {
+            continue;
         }
 
-        let response = request.send().await?;
+        let etag = obj.etag.map(|s| s.trim_matches('"').to_string());
 
-        for obj in response.contents() {
-            if let Some(key) = obj.key() {
-                // Get relative path (remove prefix)
-                let relative_key = if !prefix.is_empty() && key.starts_with(prefix) {
-                    key[prefix.len()..].trim_start_matches('/')
-                } else {
-                    key
-                };
-
-                if relative_key.is_empty() {
-                    continue;
-                }
-
-                // Apply filters
-                if !filter.matches(relative_key) {
-                    continue;
-                }
-
-                let size = obj.size().unwrap_or(0) as u64;
-                let etag = obj.e_tag().map(|s| s.trim_matches('"').to_string());
-
-                files.insert(
-                    relative_key.to_string(),
-                    FileInfo {
-                        path: key.to_string(),
-                        size,
-                        etag,
-                    },
-                );
-            }
-        }
-
-        if response.is_truncated() == Some(true) {
-            continuation_token = response.next_continuation_token().map(|s| s.to_string());
-        } else {
-            break;
-        }
+        files.insert(
+            relative_key,
+            FileInfo {
+                size: obj.size as u64,
+                etag,
+            },
+        );
     }
 
     Ok(files)
@@ -194,7 +162,6 @@ async fn collect_local_files(
             files.insert(
                 file_name.clone(),
                 FileInfo {
-                    path: path.to_string(),
                     size: metadata.len(),
                     etag,
                 },
@@ -202,33 +169,21 @@ async fn collect_local_files(
         }
     } else {
         // Directory - walk recursively
-        for entry in WalkDir::new(base_path)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().is_file())
-        {
-            let full_path = entry.path();
-            let relative_path = full_path
-                .strip_prefix(base_path)
-                .unwrap_or(full_path)
-                .to_string_lossy()
-                .to_string();
-
-            if !filter.matches(&relative_path) {
+        for entry in walk_local_files(path)? {
+            if !filter.matches(&entry.relative) {
                 continue;
             }
 
-            let metadata = fs::metadata(full_path).await?;
+            let metadata = fs::metadata(&entry.path).await?;
             let etag = if calculate_etag {
-                calculate_file_etag(full_path).await.ok()
+                calculate_file_etag(&entry.path).await.ok()
             } else {
                 None
             };
 
             files.insert(
-                relative_path,
+                entry.relative,
                 FileInfo {
-                    path: full_path.to_string_lossy().to_string(),
                     size: metadata.len(),
                     etag,
                 },

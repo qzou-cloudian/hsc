@@ -5,8 +5,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use aws_sdk_s3::Client;
 use serde::Serialize;
 
-use super::cmp::compare_paths;
-use super::cp::{upload_file, SseConfig};
+use super::cmp::{compare_paths, CompareOptions};
+use super::cp::{upload_file, UploadOptions};
+use super::transfer::{MultipartConfig, SseConfig};
 
 #[cfg(feature = "rdma")]
 use crate::rdma::RdmaClientProvider;
@@ -486,47 +487,52 @@ fn unique_temp_path() -> PathBuf {
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
+pub struct TestObjectOptions {
+    pub bucket: String,
+    pub key: Option<String>,
+    pub file: Option<String>,
+    pub bytes: Option<u64>,
+    pub chunk_size: u64,
+    pub part_size: u64,
+    pub policy: StoragePolicy,
+    pub keep: bool,
+    pub json: bool,
+    #[cfg(feature = "rdma")]
+    pub rdma: Option<Arc<dyn RdmaClientProvider>>,
+}
+
 pub async fn test_object(
     client: &Client,
-    bucket: &str,
-    key: Option<&str>,
-    file: Option<&str>,
-    bytes: Option<u64>,
-    chunk_size: u64,
-    part_size: u64,
-    policy: &StoragePolicy,
-    keep: bool,
-    json: bool,
-    #[cfg(feature = "rdma")] rdma: Option<Arc<dyn RdmaClientProvider>>,
+    opts: TestObjectOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // ── 1. Prepare local file ─────────────────────────────────────────────────
-    let (local_path, temp_file, file_size): (String, Option<PathBuf>, u64) = match (file, bytes) {
-        (Some(f), None) => {
-            let meta = tokio::fs::metadata(f)
-                .await
-                .map_err(|e| format!("Cannot access '{}': {}", f, e))?;
-            (f.to_string(), None, meta.len())
-        }
-        (None, Some(b)) => {
-            let tmp = unique_temp_path();
-            let data = generate_random_data(b);
-            tokio::fs::write(&tmp, &data)
-                .await
-                .map_err(|e| format!("Failed to write temp file: {}", e))?;
-            let path_str = tmp.to_string_lossy().into_owned();
-            (path_str, Some(tmp), b)
-        }
-        (Some(_), Some(_)) => {
-            return Err("Cannot specify both --file and --bytes".into());
-        }
-        (None, None) => {
-            return Err("Specify either --file <path> or --bytes <size>".into());
-        }
-    };
+    let (local_path, temp_file, file_size): (String, Option<PathBuf>, u64) =
+        match (opts.file.as_deref(), opts.bytes) {
+            (Some(f), None) => {
+                let meta = tokio::fs::metadata(f)
+                    .await
+                    .map_err(|e| format!("Cannot access '{}': {}", f, e))?;
+                (f.to_string(), None, meta.len())
+            }
+            (None, Some(b)) => {
+                let tmp = unique_temp_path();
+                let data = generate_random_data(b);
+                tokio::fs::write(&tmp, &data)
+                    .await
+                    .map_err(|e| format!("Failed to write temp file: {}", e))?;
+                let path_str = tmp.to_string_lossy().into_owned();
+                (path_str, Some(tmp), b)
+            }
+            (Some(_), Some(_)) => {
+                return Err("Cannot specify both --file and --bytes".into());
+            }
+            (None, None) => {
+                return Err("Specify either --file <path> or --bytes <size>".into());
+            }
+        };
 
     // ── 2. Determine S3 key ───────────────────────────────────────────────────
-    let s3_key = match key {
+    let s3_key = match opts.key {
         Some(k) => k.to_string(),
         None => {
             let ts = SystemTime::now()
@@ -536,9 +542,9 @@ pub async fn test_object(
             format!("hsc-test-{}-{}", ts, std::process::id())
         }
     };
-    let s3_uri = format!("s3://{}/{}", bucket, s3_key);
+    let s3_uri = format!("s3://{}/{}", opts.bucket, s3_key);
 
-    if !json {
+    if !opts.json {
         let source_label = if temp_file.is_some() {
             " (generated)"
         } else {
@@ -548,35 +554,33 @@ pub async fn test_object(
         println!("  Local file: {}{}", local_path, source_label);
         println!(
             "  Chunk size: {}  Part size: {}  Policy: {:?}",
-            chunk_size, part_size, policy
+            opts.chunk_size, opts.part_size, opts.policy
         );
     }
 
     // ── 3. Upload ─────────────────────────────────────────────────────────────
-    if !json {
+    if !opts.json {
         print!("  Uploading to {}... ", s3_uri);
         std::io::stdout().flush().ok();
     }
 
+    let sse = SseConfig::default();
     let upload_result = upload_file(
         client,
         &local_path,
-        bucket,
+        &opts.bucket,
         &s3_key,
-        None, // checksum_mode
-        None, // checksum_algorithm
-        &SseConfig {
-            sse: None,
-            sse_kms_key_id: None,
-            sse_c: None,
-            sse_c_key: None,
-            sse_c_copy_source: None,
-            sse_c_copy_source_key: None,
+        UploadOptions {
+            checksum_mode: None,
+            checksum_algorithm: None,
+            sse: &sse,
+            multipart: MultipartConfig {
+                threshold: opts.part_size,
+                chunksize: opts.part_size,
+            },
+            #[cfg(feature = "rdma")]
+            rdma: opts.rdma.as_ref().map(Arc::clone),
         },
-        part_size, // multipart_threshold
-        part_size, // multipart_chunksize
-        #[cfg(feature = "rdma")]
-        rdma.as_ref().map(Arc::clone),
     )
     .await;
 
@@ -585,18 +589,18 @@ pub async fn test_object(
         if let Some(ref tmp) = temp_file {
             let _ = tokio::fs::remove_file(tmp).await;
         }
-        if !json {
+        if !opts.json {
             println!("FAILED");
         }
         return Err(format!("Upload failed: {}", e).into());
     }
 
-    if !json {
+    if !opts.json {
         println!("ok");
     }
 
     // ── 4. Build test cases ───────────────────────────────────────────────────
-    let cases = build_test_cases(file_size, chunk_size, part_size, policy);
+    let cases = build_test_cases(file_size, opts.chunk_size, opts.part_size, &opts.policy);
 
     // ── 5. Run tests ──────────────────────────────────────────────────────────
     let mut results: Vec<TestResultJson> = Vec::new();
@@ -608,13 +612,15 @@ pub async fn test_object(
             client,
             &local_path,
             &s3_uri,
-            case.range.clone(),
-            None,
-            None,
-            None,
-            None,
-            #[cfg(feature = "rdma")]
-            rdma.as_ref().map(Arc::clone),
+            CompareOptions {
+                range: case.range.clone(),
+                offset: None,
+                size: None,
+                sse_c: None,
+                sse_c_key: None,
+                #[cfg(feature = "rdma")]
+                rdma: opts.rdma.as_ref().map(Arc::clone),
+            },
         )
         .await;
 
@@ -639,7 +645,7 @@ pub async fn test_object(
             failed += 1;
         }
 
-        if !json {
+        if !opts.json {
             let tag = if ok { "PASS" } else { "FAIL" };
             let err_suffix = err_msg
                 .as_deref()
@@ -664,15 +670,15 @@ pub async fn test_object(
     }
 
     // ── 6. Delete S3 object (unless --keep) ───────────────────────────────────
-    if !keep {
+    if !opts.keep {
         let del_result = client
             .delete_object()
-            .bucket(bucket)
+            .bucket(&opts.bucket)
             .key(&s3_key)
             .send()
             .await;
         if let Err(e) = del_result {
-            if !json {
+            if !opts.json {
                 eprintln!("Warning: failed to delete {}: {}", s3_uri, e);
             }
         }
@@ -684,15 +690,15 @@ pub async fn test_object(
     }
 
     // ── 7. Report ─────────────────────────────────────────────────────────────
-    if json {
+    if opts.json {
         let summary = SummaryJson {
-            bucket: bucket.to_string(),
+            bucket: opts.bucket,
             key: s3_key.clone(),
             file: local_path.clone(),
             file_size,
-            chunk_size,
-            part_size,
-            policy: format!("{:?}", policy).to_ascii_lowercase(),
+            chunk_size: opts.chunk_size,
+            part_size: opts.part_size,
+            policy: format!("{:?}", opts.policy).to_ascii_lowercase(),
             passed,
             failed,
             tests: results,

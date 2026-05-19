@@ -36,8 +36,8 @@ use aws_smithy_runtime_api::client::interceptors::Intercept;
 use aws_smithy_runtime_api::client::runtime_components::RuntimeComponents;
 use aws_smithy_types::config_bag::ConfigBag;
 
-use s3_rdma::{RdmaClientChannel, RdmaTransferHandle};
 use s3_rdma::provider::{RDMA_BYTES_HEADER, RDMA_REPLY_HEADER, RDMA_TOKEN_HEADER};
+use s3_rdma::{RdmaClientChannel, RdmaTransferHandle};
 
 // ── RdmaHandles ──────────────────────────────────────────────────────────────
 

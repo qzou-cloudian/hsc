@@ -1,3 +1,4 @@
+use crate::commands::listing::list_s3_keys;
 use crate::filters::FileFilter;
 use crate::path_utils::{parse_s3_uri, PathType};
 use aws_sdk_s3::Client;
@@ -57,46 +58,23 @@ async fn remove_recursive(
     prefix: &str,
     filter: &FileFilter,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut continuation_token: Option<String> = None;
     let mut deleted_count = 0;
 
-    loop {
-        let mut request = client.list_objects_v2().bucket(bucket);
-
-        if !prefix.is_empty() {
-            request = request.prefix(prefix);
+    for key in list_s3_keys(client, bucket, prefix).await? {
+        // Apply filters
+        if !filter.matches(&key) {
+            continue;
         }
 
-        if let Some(token) = continuation_token {
-            request = request.continuation_token(token);
-        }
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(&key)
+            .send()
+            .await?;
 
-        let response = request.send().await?;
-
-        for obj in response.contents() {
-            if let Some(key) = obj.key() {
-                // Apply filters
-                if !filter.matches(key) {
-                    continue;
-                }
-
-                client
-                    .delete_object()
-                    .bucket(bucket)
-                    .key(key)
-                    .send()
-                    .await?;
-
-                println!("Deleted: s3://{}/{}", bucket, key);
-                deleted_count += 1;
-            }
-        }
-
-        if response.is_truncated() == Some(true) {
-            continuation_token = response.next_continuation_token().map(|s| s.to_string());
-        } else {
-            break;
-        }
+        println!("Deleted: s3://{}/{}", bucket, key);
+        deleted_count += 1;
     }
 
     println!("Total deleted: {} objects", deleted_count);
