@@ -26,7 +26,10 @@ use crate::commands::transfer::{
 use crate::rdma::{RdmaClientProvider, RdmaInterceptor};
 
 #[cfg(feature = "rdma")]
-use std::sync::{atomic::AtomicBool, Arc};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 pub struct CopyOptions {
     pub recursive: bool,
@@ -246,6 +249,7 @@ pub async fn upload_file(
                     opts.checksum_mode.as_ref(),
                     opts.checksum_algorithm.as_ref(),
                 );
+                let confirmed = Arc::clone(&rdma_confirmed);
                 let interceptor = RdmaInterceptor::new_put(
                     prepared.channel,
                     prepared.token,
@@ -266,10 +270,18 @@ pub async fn upload_file(
                     .send()
                     .await?;
                 // prepared.channel is dropped here and deregisters memory.
-                println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
-                return Ok(());
+                if confirmed.load(Ordering::Acquire) {
+                    println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
+                    return Ok(());
+                }
+                // The server answered 200 but did not perform the RDMA transfer (x-amz-rdma-reply
+                // 501 = RDMA path unavailable on that node, or no reply at all): nothing, or only an
+                // empty object, was stored. Never report that as uploaded; resend over HTTP below.
+                eprintln!(
+                    "Warning: server did not complete the RDMA transfer for s3://{bucket}/{key}; retrying over HTTP"
+                );
             }
-            // RDMA bind or prepare failed; fall through to standard HTTP upload below.
+            // RDMA bind/prepare failed, or the server declined RDMA; use standard HTTP upload below.
         }
 
         let body;
@@ -394,7 +406,8 @@ async fn upload_file_multipart(
                         opts.checksum_mode.as_ref(),
                         opts.checksum_algorithm.as_ref(),
                     );
-                    part_cksum_val = cksum_val.clone();
+                    let rdma_part_cksum = cksum_val.clone();
+                    let confirmed = Arc::clone(&rdma_confirmed);
                     let interceptor = RdmaInterceptor::new_put(
                         prepared.channel,
                         prepared.token,
@@ -405,7 +418,7 @@ async fn upload_file_multipart(
                         cksum_alg,
                         cksum_val,
                     );
-                    client
+                    let rdma_resp = client
                         .upload_part()
                         .bucket(bucket)
                         .key(key)
@@ -415,7 +428,34 @@ async fn upload_file_multipart(
                         .customize()
                         .interceptor(interceptor)
                         .send()
-                        .await?
+                        .await?;
+                    if confirmed.load(Ordering::Acquire) {
+                        part_cksum_val = rdma_part_cksum;
+                        rdma_resp
+                    } else {
+                        // The server returned 200 without doing the RDMA transfer (reply 501 or
+                        // none): the part was not stored and the response has no ETag. Resend the
+                        // part body over HTTP.
+                        eprintln!(
+                            "Warning: server did not complete the RDMA transfer for part {part_number}; retrying over HTTP"
+                        );
+                        let (resp, cksum) = upload_part_http(
+                            client,
+                            chunk_buf,
+                            UploadPartHttpOptions {
+                                bucket,
+                                key,
+                                upload_id,
+                                part_number,
+                                checksum_mode: opts.checksum_mode.as_ref(),
+                                checksum_algorithm: opts.checksum_algorithm.as_ref(),
+                                sse: opts.sse,
+                            },
+                        )
+                        .await?;
+                        part_cksum_val = cksum;
+                        resp
+                    }
                 } else {
                     // RDMA bind or prepare_put unavailable — fall back to plain HTTP body.
                     let (resp, cksum) = upload_part_http(

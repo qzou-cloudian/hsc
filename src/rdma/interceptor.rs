@@ -64,9 +64,9 @@ const CHECKSUM_HEADERS: &[&str] = &[
 /// 1. Injects `x-amz-rdma-token` and `x-amz-rdma-size` request headers.
 /// 2. For PUT requests: injects `x-amz-sdk-checksum-algorithm` and
 ///    `x-amz-checksum-<alg>` headers with a precomputed checksum of the data.
-/// 3. On response: if `x-amz-rdma-reply` is present, strips checksum headers
-///    so the SDK does not validate the empty HTTP body, and sets
-///    `rdma_confirmed` so the caller knows to use the pre-filled RDMA buffer.
+/// 3. On response: if `x-amz-rdma-reply` carries a success status (200/204/206), strips checksum
+///    headers so the SDK does not validate the empty HTTP body, and sets `rdma_confirmed` so the
+///    caller knows the data moved over RDMA. Any other reply (e.g. 501 fallback) leaves it unset.
 pub struct RdmaInterceptor {
     channel: Arc<dyn RdmaClientChannel>,
     /// Pre-joined token bytes for the `x-amz-rdma-token` HTTP header.
@@ -77,7 +77,7 @@ pub struct RdmaInterceptor {
     handles: Mutex<Option<RdmaHandles>>,
     /// Byte count for the transfer (fallback for `x-amz-rdma-bytes` when absent).
     size: usize,
-    /// Set to `true` by the interceptor when the server confirms RDMA.
+    /// Set to `true` by the interceptor only when the server confirms a successful RDMA transfer.
     rdma_confirmed: Arc<AtomicBool>,
     debug: bool,
     /// Checksum algorithm name for PUT requests (e.g. "CRC32C"), if requested.
@@ -232,10 +232,16 @@ impl Intercept for RdmaInterceptor {
                     reply_header_value
                 );
             }
-            self.rdma_confirmed.store(true, Ordering::Release);
-
             // Parse the reply header as a numeric HTTP status code (200/204/206 = success, 501 = fallback).
             let rdma_status: u16 = reply_header_value.trim().parse().unwrap_or(0);
+
+            // Only a success reply means the data moved over RDMA. A 501 ("RDMA not possible, fall
+            // back to TCP") or an unparseable reply must NOT confirm: for a PUT/UploadPart the server
+            // stored nothing and the caller has to resend the body over HTTP; for a GET the data is
+            // in the HTTP body, not in the RDMA buffer.
+            if reply_confirms_rdma(rdma_status) {
+                self.rdma_confirmed.store(true, Ordering::Release);
+            }
 
             // Read the byte-count header (x-amz-rdma-bytes) if present.
             let transferred: usize = context
@@ -296,5 +302,33 @@ impl Intercept for RdmaInterceptor {
             }
         }
         Ok(())
+    }
+}
+
+/// Whether an `x-amz-rdma-reply` status means the data really moved over RDMA.
+///
+/// 200/204/206 are success. 501 is the server's "RDMA unavailable, fall back to TCP" answer, and
+/// anything else (including an unparseable value, parsed as 0) is not a confirmation either.
+fn reply_confirms_rdma(status: u16) -> bool {
+    matches!(status, 200 | 204 | 206)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reply_confirms_rdma;
+
+    #[test]
+    fn success_statuses_confirm() {
+        for s in [200u16, 204, 206] {
+            assert!(reply_confirms_rdma(s), "{s} should confirm RDMA");
+        }
+    }
+
+    #[test]
+    fn fallback_and_failures_do_not_confirm() {
+        // 501 = server could not use RDMA: a PUT stored nothing, a GET body carries the data.
+        for s in [501u16, 0, 400, 403, 404, 500, 503] {
+            assert!(!reply_confirms_rdma(s), "{s} must not confirm RDMA");
+        }
     }
 }
