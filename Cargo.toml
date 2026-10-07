@@ -38,5 +38,6 @@ md-5 = "0.10.6"
 sha-1 = "0.10.1"
 sha2 = "0.10.9"
 tokio = { version = "1.49.0", features = ["full"] }
+percent-encoding = "2.3"
 tower-service = "0.3"
 walkdir = "2.5.0"

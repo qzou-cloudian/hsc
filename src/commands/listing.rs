@@ -1,4 +1,6 @@
+use aws_sdk_s3::types::EncodingType;
 use aws_sdk_s3::Client;
+use percent_encoding::percent_decode_str;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -22,6 +24,14 @@ pub(crate) struct LocalFileEntry {
     pub relative_unix: String,
 }
 
+fn decode_key(raw: &str, encoding: Option<&EncodingType>) -> String {
+    if encoding == Some(&EncodingType::Url) {
+        percent_decode_str(raw).decode_utf8_lossy().into_owned()
+    } else {
+        raw.to_string()
+    }
+}
+
 pub(crate) async fn list_s3_objects(
     client: &Client,
     bucket: &str,
@@ -42,11 +52,12 @@ pub(crate) async fn list_s3_objects(
         }
 
         let response = request.send().await?;
+        let enc = response.encoding_type();
 
         for obj in response.contents() {
             if let Some(key) = obj.key() {
                 objects.push(S3ObjectEntry {
-                    key: key.to_string(),
+                    key: decode_key(key, enc),
                     size: obj.size().unwrap_or(0),
                     etag: obj.e_tag().map(str::to_string),
                 });
@@ -97,9 +108,10 @@ pub(crate) async fn list_s3_keys_limited(
         }
 
         let response = request.send().await?;
+        let enc = response.encoding_type();
         for obj in response.contents() {
             if let Some(key) = obj.key() {
-                keys.push(key.to_string());
+                keys.push(decode_key(key, enc));
                 if keys.len() as u64 >= limit {
                     return Ok(keys);
                 }

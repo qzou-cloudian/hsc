@@ -1,6 +1,8 @@
 use crate::path_utils::{parse_path, PathType};
+use aws_sdk_s3::types::EncodingType;
 use aws_sdk_s3::Client;
 use aws_smithy_types::date_time::Format;
+use percent_encoding::percent_decode_str;
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -161,6 +163,14 @@ async fn list_buckets(client: &Client) -> Result<ListBucketsOutput, Box<dyn std:
     })
 }
 
+fn decode_key(raw: &str, encoding: Option<&EncodingType>) -> String {
+    if encoding == Some(&EncodingType::Url) {
+        percent_decode_str(raw).decode_utf8_lossy().into_owned()
+    } else {
+        raw.to_string()
+    }
+}
+
 async fn list_objects(
     client: &Client,
     bucket: &str,
@@ -185,12 +195,13 @@ async fn list_objects(
         }
 
         let response = request.send().await?;
+        let enc = response.encoding_type();
 
         if !recursive {
             for common_prefix in response.common_prefixes() {
                 if let Some(prefix_str) = common_prefix.prefix() {
                     prefixes.push(PrefixEntry {
-                        key: prefix_str.to_string(),
+                        key: decode_key(prefix_str, enc),
                         kind: "prefix".to_string(),
                     });
                 }
@@ -202,7 +213,7 @@ async fn list_objects(
                 let size = obj.size().unwrap_or(0);
                 total_size += size;
                 objects.push(ObjectEntry {
-                    key: key.to_string(),
+                    key: decode_key(key, enc),
                     last_modified: obj.last_modified().map(|d| d.to_string()),
                     size,
                 });
