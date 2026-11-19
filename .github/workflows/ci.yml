@@ -10,9 +10,9 @@ env:
   CARGO_TERM_COLOR: always
 
 # Reusable step to create stub crates for private path dependencies.
-# s3-rdma and its cuobj dep live in private repos not available in CI.
+# s3-rdma lives in private repos not available in CI.
 # Cargo resolves ALL path deps (even optional ones) at startup, so stubs
-# are required even when the rdma/cuobj features are not enabled.
+# are required even when the rdma feature is not enabled.
 
 jobs:
   test:
@@ -23,10 +23,10 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Create stubs for private path dependencies
         run: |
-          mkdir -p ../s3-rdma/core/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
-              > ../s3-rdma/core/Cargo.toml
-          touch ../s3-rdma/core/src/lib.rs
+          mkdir -p ../s3-rdma/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nrdma-client = []\n' \
+              > ../s3-rdma/Cargo.toml
+          touch ../s3-rdma/src/lib.rs
       - name: Run tests
         run: cargo test --verbose
       
@@ -40,10 +40,10 @@ jobs:
           components: clippy
       - name: Create stubs for private path dependencies
         run: |
-          mkdir -p ../s3-rdma/core/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
-              > ../s3-rdma/core/Cargo.toml
-          touch ../s3-rdma/core/src/lib.rs
+          mkdir -p ../s3-rdma/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nrdma-client = []\n' \
+              > ../s3-rdma/Cargo.toml
+          touch ../s3-rdma/src/lib.rs
       - name: Run clippy
         run: cargo clippy -- -D warnings
   
@@ -69,9 +69,9 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Create stubs for private path dependencies
         run: |
-          mkdir -p ../s3-rdma/core/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ncuobj-client = []\n' \
-              > ../s3-rdma/core/Cargo.toml
-          touch ../s3-rdma/core/src/lib.rs
+          mkdir -p ../s3-rdma/src
+          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nrdma-client = []\n' \
+              > ../s3-rdma/Cargo.toml
+          touch ../s3-rdma/src/lib.rs
       - name: Build
         run: cargo build --release --verbose
