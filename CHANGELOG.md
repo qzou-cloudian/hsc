@@ -2,6 +2,35 @@
 
 All notable changes to hsc will be documented in this file.
 
+## [0.5.1] - 2026-11-19
+
+### Changed
+
+- **RDMA is always built**: `rdma` is now a default Cargo feature
+  (`--no-default-features` opts out). s3-rdma and cuobj are public, so CI and
+  releases build against the real crates instead of stubs.
+- **cuObject plugin shipped**: release builds now include `libs3rdmaclient.so`
+  built with the `cuobj` feature against the latest NVIDIA cuObject client SDK
+  (libcuobjclient 1.4.0, CUDA 13.5). It is published as
+  `libs3rdmaclient-linux-x86_64.so` and installed by the RPM and DEB packages.
+  At runtime it needs `libcuobjclient.so.1` (NVIDIA `libcuobjclient` package).
+- **Linux binary is now glibc-based**: `hsc-linux-x86_64` is built on Rocky 8
+  (glibc 2.28+) instead of static musl, which cannot load the RDMA plugin.
+
+### Build
+
+- Docker builder images install the newest cuObject client SDK (plus matching
+  cuFile/cudart headers and ibverbs) from NVIDIA's CUDA repos; the Makefile no
+  longer mounts a host CUDA directory and always builds the cuobj plugin.
+- Release workflow builds Linux artifacts in the builder images and checks that
+  the tag matches the `Cargo.toml` version.
+- `Cargo.lock` is now tracked for reproducible builds.
+
+### Internal
+
+- `RdmaInterceptor::new_put` takes the checksum as a single
+  `Option<(algorithm, value)>` (fixes `clippy::too_many_arguments`).
+
 ## [0.5.0] - 2026-11-19
 
 ### Fixed
