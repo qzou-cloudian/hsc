@@ -9,10 +9,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
-# Reusable step to create stub crates for private path dependencies.
-# s3-rdma lives in private repos not available in CI.
-# Cargo resolves ALL path deps (even optional ones) at startup, so stubs
-# are required even when the rdma feature is not enabled.
+# s3-rdma and cuobj are public path dependencies expected next to this repo
+# (../s3-rdma, ../cuobj).  Every job that runs cargo clones them first.
+# hsc builds with the rdma feature by default; the cuobj-enabled
+# libs3rdmaclient.so plugin is built in the Docker builder images, which carry
+# the latest NVIDIA cuObject client SDK.
 
 jobs:
   test:
@@ -21,15 +22,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Create stubs for private path dependencies
+      - name: Clone path dependencies
         run: |
-          mkdir -p ../s3-rdma/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nrdma-client = []\n' \
-              > ../s3-rdma/Cargo.toml
-          touch ../s3-rdma/src/lib.rs
+          git clone --depth 1 https://github.com/qzou-cloudian/s3-rdma.git ../s3-rdma
+          git clone --depth 1 https://github.com/qzou-cloudian/cuobj.git ../cuobj
       - name: Run tests
         run: cargo test --verbose
-      
+
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
@@ -38,15 +37,13 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           components: clippy
-      - name: Create stubs for private path dependencies
+      - name: Clone path dependencies
         run: |
-          mkdir -p ../s3-rdma/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nrdma-client = []\n' \
-              > ../s3-rdma/Cargo.toml
-          touch ../s3-rdma/src/lib.rs
+          git clone --depth 1 https://github.com/qzou-cloudian/s3-rdma.git ../s3-rdma
+          git clone --depth 1 https://github.com/qzou-cloudian/cuobj.git ../cuobj
       - name: Run clippy
-        run: cargo clippy -- -D warnings
-  
+        run: cargo clippy --all-targets -- -D warnings
+
   fmt:
     name: Format
     runs-on: ubuntu-latest
@@ -57,21 +54,35 @@ jobs:
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
-  
-  build:
-    name: Build
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+
+  # hsc + cuobj plugin for Ubuntu 24.04 and Rocky 8, built in the same Docker
+  # images used for releases.
+  build-linux:
+    name: Build Linux (hsc + cuobj plugin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone path dependencies
+        run: |
+          git clone --depth 1 https://github.com/qzou-cloudian/s3-rdma.git ../s3-rdma
+          git clone --depth 1 https://github.com/qzou-cloudian/cuobj.git ../cuobj
+      - name: Build builder images
+        run: make docker-images
+      - name: Build
+        run: |
+          mkdir -p ~/.cargo/registry ~/.cargo/git
+          make all
+          ls -l dist/*/
+
+  build-macos:
+    name: Build macOS
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Create stubs for private path dependencies
+      - name: Clone path dependencies
         run: |
-          mkdir -p ../s3-rdma/src
-          printf '[package]\nname = "s3-rdma"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\nrdma-client = []\n' \
-              > ../s3-rdma/Cargo.toml
-          touch ../s3-rdma/src/lib.rs
+          git clone --depth 1 https://github.com/qzou-cloudian/s3-rdma.git ../s3-rdma
+          git clone --depth 1 https://github.com/qzou-cloudian/cuobj.git ../cuobj
       - name: Build
         run: cargo build --release --verbose

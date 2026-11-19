@@ -1,6 +1,20 @@
 FROM rockylinux:8
 
-RUN dnf install -y gcc gcc-c++ make curl ca-certificates git rpm-build rpmdevtools && \
+RUN dnf install -y gcc gcc-c++ make curl ca-certificates git rpm-build rpmdevtools rdma-core-devel && \
+    dnf clean all
+
+# Latest NVIDIA cuObject client SDK from the CUDA rhel8 repo; required to build
+# the s3-rdma-client plugin with --features cuobj.  The newest
+# libcuobjclient-devel-<cuda> package is picked at image build time, together with the
+# cuFile and CUDA runtime headers of the same CUDA release (cuobjclient.h
+# includes cufile.h -> cuda.h, and infiniband/verbs.h from ibverbs).  /usr/local/cuda is pointed at
+# that CUDA root.
+RUN curl -fsSL -o /etc/yum.repos.d/cuda-rhel8.repo \
+        https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo && \
+    PKG=$(dnf -q repoquery --qf '%{name}' 'libcuobjclient-devel-13-*' 2>/dev/null | sort -uV | tail -1) && \
+    echo "Installing $PKG" && \
+    dnf install -y "$PKG" "libcufile-devel-${PKG##*-devel-}" "cuda-cudart-devel-${PKG##*-devel-}" && \
+    ln -sfn "$(ls -d /usr/local/cuda-* | sort -V | tail -1)" /usr/local/cuda && \
     dnf clean all
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \

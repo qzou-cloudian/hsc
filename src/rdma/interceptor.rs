@@ -80,10 +80,9 @@ pub struct RdmaInterceptor {
     /// Set to `true` by the interceptor only when the server confirms a successful RDMA transfer.
     rdma_confirmed: Arc<AtomicBool>,
     debug: bool,
-    /// Checksum algorithm name for PUT requests (e.g. "CRC32C"), if requested.
-    checksum_algorithm: Option<String>,
-    /// Base64-encoded precomputed checksum of the data, if requested.
-    checksum_value: Option<String>,
+    /// Checksum for PUT requests, if requested: algorithm name (e.g. "CRC32C")
+    /// and base64-encoded precomputed checksum of the data.
+    checksum: Option<(String, String)>,
 }
 
 impl std::fmt::Debug for RdmaInterceptor {
@@ -104,10 +103,8 @@ impl RdmaInterceptor {
     /// [`RdmaTransferHandle`]s returned by [`RdmaClientChannel::prepare_put`];
     /// they are consumed in `read_after_transmit` to call `complete_put`.
     ///
-    /// `checksum_algorithm` and `checksum_value` are injected as
+    /// `checksum` is an `(algorithm, base64 value)` pair injected as the
     /// `x-amz-sdk-checksum-algorithm` and `x-amz-checksum-<alg>` headers.
-    /// Both must be `Some` or both `None`; passing one without the other is
-    /// silently ignored.
     pub fn new_put(
         channel: Arc<dyn RdmaClientChannel>,
         token: Vec<u8>,
@@ -115,8 +112,7 @@ impl RdmaInterceptor {
         size: usize,
         rdma_confirmed: Arc<AtomicBool>,
         debug: bool,
-        checksum_algorithm: Option<String>,
-        checksum_value: Option<String>,
+        checksum: Option<(String, String)>,
     ) -> Self {
         Self {
             channel,
@@ -125,8 +121,7 @@ impl RdmaInterceptor {
             size,
             rdma_confirmed,
             debug,
-            checksum_algorithm,
-            checksum_value,
+            checksum,
         }
     }
 
@@ -150,8 +145,7 @@ impl RdmaInterceptor {
             size,
             rdma_confirmed,
             debug,
-            checksum_algorithm: None,
-            checksum_value: None,
+            checksum: None,
         }
     }
 }
@@ -181,7 +175,7 @@ impl Intercept for RdmaInterceptor {
         }
         headers.remove("x-amz-sdk-checksum-algorithm");
         // Inject our precomputed checksum only when one was requested.
-        if let (Some(alg), Some(val)) = (&self.checksum_algorithm, &self.checksum_value) {
+        if let Some((alg, val)) = &self.checksum {
             if self.debug {
                 eprintln!("[RdmaInterceptor] injecting checksum headers before signing: alg={alg}");
             }

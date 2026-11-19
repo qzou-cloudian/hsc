@@ -12,8 +12,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 cargo build                          # Debug build
-cargo build --release                # Release build
-cargo build --release --features rdma  # Build with RDMA support (requires s3-rdma and cuobj dependencies)
+cargo build --release                # Release build (includes the rdma feature)
+cargo build --no-default-features     # Build without RDMA (rdma is a default feature)
 ```
 
 ### Lint & Format
@@ -48,7 +48,7 @@ make rocky            # Rocky Linux 8 only
 make packages         # Build RPM and DEB packages as well
 ```
 
-Output goes to `dist/ubuntu-24.04/` and `dist/rocky-8/`. The Makefile uses named Docker volumes (`hsc-target-ubuntu-24.04`, `hsc-target-rocky-8`) for incremental builds. Override build variables with `FEATURES=rdma CUDA_DIR=/usr/local/cuda-13.2 S3RDMA_SRC=../s3-rdma`.
+Output goes to `dist/ubuntu-24.04/` and `dist/rocky-8/`. The Makefile uses named Docker volumes (`hsc-target-ubuntu-24.04`, `hsc-target-rocky-8`) for incremental builds. Every build produces `hsc` (rdma feature) plus `libs3rdmaclient.so` built with the s3-rdma-client `cuobj` feature; the builder images install the latest NVIDIA cuObject client SDK (`libcuobjclient-dev`, plus matching cuFile/cudart headers and ibverbs) from NVIDIA's CUDA repo, so rerun `make docker-images` to pick up a newer SDK. Override source paths with `S3RDMA_SRC=../s3-rdma CUOBJ_SRC=../cuobj`.
 
 ## Architecture
 
@@ -86,12 +86,12 @@ Each subcommand is a separate file. The largest/most complex ones:
 
 ### RDMA Feature (`src/rdma/`)
 
-Conditionally compiled with `--features rdma`. The `RdmaInterceptor` hooks into the Smithy HTTP layer to route data through RDMA (GPU-direct or CPU-direct) instead of the standard TCP stack. Requires `s3-rdma` crate (path dependency, not on crates.io) and the cuObject SDK.
+Compiled via the `rdma` feature, which is on by default. The `RdmaInterceptor` hooks into the Smithy HTTP layer to route data through RDMA (GPU-direct or CPU-direct) instead of the standard TCP stack. Requires the public `s3-rdma` crate as a path dependency at `../s3-rdma` (which itself needs `../cuobj` for its plugin). hsc loads the cuObject backend at runtime from `libs3rdmaclient.so`; only that plugin links the cuObject SDK.
 
 ## Important Conventions
 
 - **No unit tests in-repo** — all verification is via shell integration tests against a real S3 endpoint.
-- **RDMA is not built in CI** — the `s3-rdma` crate is a private path dependency. CI uses a stub. Don't assume RDMA code is CI-verified.
+- **RDMA is always built** — s3-rdma and cuobj are public repos; CI clones them next to hsc, builds hsc with the default `rdma` feature, and builds the cuobj plugin in the Docker builder images. No hardware tests run in CI.
 - **Smithy interceptors for cross-cutting concerns** — new HTTP-level behaviors should be interceptors, not per-command logic.
 - **Async throughout** — all commands are `async fn` using `tokio`. Multipart operations use `tokio::task::spawn` for concurrent part transfers.
 - **Checksum propagation** — `cp` computes checksums client-side and passes them in `ChecksumAlgorithm` SDK fields; the server verifies. Be careful not to break this when touching upload paths.

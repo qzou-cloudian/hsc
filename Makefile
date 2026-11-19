@@ -10,18 +10,14 @@
 #   make                        # build for both platforms
 #   make ubuntu                 # Ubuntu 24.04 only
 #   make rocky                  # Rocky Linux 8 only
-#   make FEATURES=rdma ubuntu   # without cuObject, RDMA mock only
-#   make FEATURES= ubuntu       # default (no RDMA)
 #   make clean                  # remove dist/
+#
+# hsc is always built with the rdma feature, and libs3rdmaclient.so is always
+# built with the cuobj feature against the latest NVIDIA cuObject client SDK,
+# which is installed in the builder images (see docker/Dockerfile.*).
 # =============================================================================
 
 # ── Configurable variables ────────────────────────────────────────────────────
-
-# Cargo features to enable (rdma | <empty>)
-FEATURES   ?= rdma
-
-# CUDA / cuObject SDK root on the host (must contain include/cuobjclient.h)
-CUDA_DIR   ?= /usr/local/cuda-13.2
 
 # Path to the cuobj Rust source tree (needed for the cuobj crate path dep)
 CUOBJ_SRC  ?= $(abspath ../cuobj)
@@ -51,18 +47,16 @@ ROCKY_VOL      := hsc-target-rocky-8
 define BUILD_CMD
 set -e; \
 cd /build/hsc; \
-CUOBJ_ROOT_DIR=/usr/local/cuda \
-cargo build --release $(if $(FEATURES),--features $(FEATURES)) \
+export CUOBJ_ROOT_DIR=/usr/local/cuda/targets/x86_64-linux; \
+cargo build --release --features rdma \
     --target-dir /cargo/target; \
 cp /cargo/target/release/hsc /out/; \
-if echo "$(FEATURES)" | grep -q rdma; then \
-    cargo build --release \
-        --manifest-path ../s3-rdma/Cargo.toml \
-        -p s3-rdma-client \
-        --features cuobj \
-        --target-dir /cargo/target-cuobj; \
-    cp /cargo/target-cuobj/release/libs3rdmaclient.so /out/; \
-fi
+cargo build --release \
+    --manifest-path ../s3-rdma/Cargo.toml \
+    -p s3-rdma-client \
+    --features cuobj \
+    --target-dir /cargo/target/plugin; \
+cp /cargo/target/plugin/release/libs3rdmaclient.so /out/
 endef
 
 # Common docker run flags
@@ -71,7 +65,6 @@ define DOCKER_RUN_FLAGS
 -v "$(HSC_DIR):/build/hsc:ro" \
 -v "$(CUOBJ_SRC):/build/cuobj:ro" \
 -v "$(S3RDMA_SRC):/build/s3-rdma" \
--v "$(CUDA_DIR):/usr/local/cuda:ro" \
 -v "$(CARGO_REGISTRY):/root/.cargo/registry" \
 -v "$(CARGO_GIT):/root/.cargo/git"
 endef
@@ -102,8 +95,8 @@ docker-images:
 
 # ── Packaging ─────────────────────────────────────────────────────────────────
 # Builds distribution packages from the pre-compiled binaries produced by
-# 'make rocky' / 'make ubuntu'.  Both hsc and libs3rdmaclient.so (when
-# present) are included in the package.
+# 'make rocky' / 'make ubuntu'.  Both hsc and libs3rdmaclient.so are
+# included in the package.
 
 packages: rpm deb
 
@@ -147,18 +140,14 @@ help:
 	@echo "  clean-volumes        Remove Docker build-cache volumes (forces full Cargo rebuild)"
 	@echo ""
 	@echo "Variables (override on command line):"
-	@echo "  FEATURES   Cargo features  [default: rdma]"
-	@echo "             rdma — RDMA via cuobj SDK (requires CUDA_DIR)"
-	@echo "             (empty)— no RDMA support"
-	@echo "  CUDA_DIR   CUDA/cuObject SDK root  [default: /usr/local/cuda-13.2]"
 	@echo "  CUOBJ_SRC  cuobj Rust source tree  [default: ../cuobj]"
 	@echo "  S3RDMA_SRC s3-rdma Rust source tree  [default: ../s3-rdma]"
 	@echo ""
 	@echo "Output:"
 	@echo "  dist/ubuntu-24.04/hsc"
-	@echo "  dist/ubuntu-24.04/libs3rdmaclient.so  (when FEATURES=rdma)"
+	@echo "  dist/ubuntu-24.04/libs3rdmaclient.so"
 	@echo "  dist/ubuntu-24.04/hsc_<version>_amd64.deb"
 	@echo "  dist/rocky-8/hsc"
-	@echo "  dist/rocky-8/libs3rdmaclient.so        (when FEATURES=rdma)"
+	@echo "  dist/rocky-8/libs3rdmaclient.so"
 	@echo "  dist/rocky-8/hsc-<version>-1.el8.x86_64.rpm"
 	@echo ""

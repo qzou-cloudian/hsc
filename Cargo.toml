@@ -10,6 +10,8 @@ keywords = ["s3", "aws", "cli", "cloud-storage"]
 categories = ["command-line-utilities"]
 
 [features]
+# RDMA is always built in; use --no-default-features to opt out.
+default = ["rdma"]
 # Enable RDMA support (loads libs3rdmaclient.so at runtime via rdma-client
 # feature, plus mock provider for testing).
 rdma = ["dep:s3-rdma", "s3-rdma/rdma-client"]

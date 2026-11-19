@@ -2,7 +2,23 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential g++ git \
-        dpkg-dev fakeroot && \
+        dpkg-dev fakeroot libibverbs-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Latest NVIDIA cuObject client SDK from the CUDA apt repo; required to build
+# the s3-rdma-client plugin with --features cuobj.  The newest
+# libcuobjclient-dev-<cuda> package is picked at image build time, together with the
+# cuFile and CUDA runtime headers of the same CUDA release (cuobjclient.h
+# includes cufile.h -> cuda.h, and infiniband/verbs.h from ibverbs).  /usr/local/cuda is pointed at
+# that CUDA root.
+RUN curl -fsSL -o /tmp/cuda-keyring.deb \
+        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
+    dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb && \
+    apt-get update && \
+    PKG=$(apt-cache pkgnames libcuobjclient-dev- | sort -V | tail -1) && \
+    echo "Installing $PKG" && \
+    apt-get install -y --no-install-recommends "$PKG" "libcufile-dev-${PKG##*-dev-}" "cuda-cudart-dev-${PKG##*-dev-}" && \
+    ln -sfn "$(ls -d /usr/local/cuda-* | sort -V | tail -1)" /usr/local/cuda && \
     rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \

@@ -313,15 +313,23 @@ hostname-based certificates work correctly without `--no-verify-ssl`.
 RDMA support accelerates large object transfers by allowing the S3 server to
 read/write directly into registered host (or GPU) memory, bypassing the CPU.
 
-Build with RDMA support:
+RDMA support is built in by default (the `rdma` feature). It needs the public
+[s3-rdma](https://github.com/qzou-cloudian/s3-rdma) and
+[cuobj](https://github.com/qzou-cloudian/cuobj) repositories checked out next to
+this one:
 
 ```bash
-# Mock provider (no hardware required, useful for testing)
-cargo build --release --features rdma
-
-# RDMA support (loads libs3rdmaclient.so at runtime; requires RDMA hardware)
-cargo build --release --features rdma
+git clone https://github.com/qzou-cloudian/s3-rdma.git ../s3-rdma
+git clone https://github.com/qzou-cloudian/cuobj.git ../cuobj
+cargo build --release                       # hsc with RDMA (mock provider built in)
+cargo build --release --no-default-features # hsc without RDMA
 ```
+
+The cuObject backend lives in the `libs3rdmaclient.so` plugin, loaded at runtime.
+`make` builds hsc and the plugin (with the `cuobj` feature, against the latest
+NVIDIA cuObject client SDK) for Ubuntu 24.04 and Rocky 8; release packages ship both.
+At runtime the plugin needs `libcuobjclient.so.1` (NVIDIA `libcuobjclient` package)
+on the library path.
 
 Enable RDMA at runtime:
 

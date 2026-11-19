@@ -257,8 +257,7 @@ pub async fn upload_file(
                     size,
                     rdma_confirmed,
                     false,
-                    cksum_alg,
-                    cksum_val,
+                    cksum_alg.zip(cksum_val),
                 );
                 client
                     .put_object()
@@ -415,8 +414,7 @@ async fn upload_file_multipart(
                         bytes_read,
                         rdma_confirmed,
                         false,
-                        cksum_alg,
-                        cksum_val,
+                        cksum_alg.zip(cksum_val),
                     );
                     let rdma_resp = client
                         .upload_part()
