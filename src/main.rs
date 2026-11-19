@@ -17,7 +17,7 @@ struct Cli {
     #[arg(long, global = true)]
     debug: bool,
 
-    /// Enable RDMA transfers.  PROVIDER may be `rdma`, `auto` or `mock`.
+    /// Enable RDMA transfers.  PROVIDER may be `cuobj`, `auto` or `mock`.
     /// Omitting PROVIDER (bare `--rdma`) auto-selects the best available provider.
     #[cfg(feature = "rdma")]
     #[arg(long, global = true, num_args = 0..=1, value_name = "PROVIDER",
@@ -774,6 +774,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(p) => match rdma::RdmaProviderConfig::builder()
                 .provider(p)
                 .debug(client_config_clone.debug)
+                // hsc never binds more than one pool slot per request.
+                .client_buf_size(commands::transfer::RDMA_MAX_BIND_SIZE)
                 .build_client()
             {
                 Ok(provider) => Some(provider),

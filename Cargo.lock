@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "hsc"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aws-config",
  "aws-credential-types",

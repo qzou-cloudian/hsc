@@ -2,6 +2,40 @@
 
 All notable changes to hsc will be documented in this file.
 
+## [0.5.2] - 2026-11-19
+
+### Fixed
+
+- **RDMA GETs larger than 128 MiB fell back to HTTP**: since s3-rdma's bounded
+  client buffer pool, a single RDMA buffer is capped at 128 MiB. `cp` downloads,
+  `cat` and `cmp` now fetch larger objects/ranges as consecutive ranged GETs of
+  at most 128 MiB, each over RDMA, so objects of any size use RDMA with bounded
+  memory.
+- **RPM required `libcuobjclient.so.1`**: the package no longer declares a hard
+  dependency on the cuObject SDK, so it installs on hosts (e.g. HyperStore
+  nodes) where the SDK comes from a tarball. The plugin still needs the library
+  at runtime for `--rdma`.
+- **`--rdma` help text** now lists `cuobj` (not the old `rdma` name) as the
+  provider.
+
+### Changed
+
+- PUT request bodies larger than 128 MiB (single PUT with
+  `--disable-multipart`, or multipart parts with `--part-size` above 128m) are
+  sent over HTTP with a notice instead of attempting RDMA: HyperStore does not
+  accept multi-buffer RDMA PUTs. Multipart uploads with parts of at most 128 MiB
+  (the default is 8 MiB) use RDMA.
+- `cat --part-number` reads over HTTP: HyperStore fails RDMA GETs that carry
+  `partNumber`.
+- `cp` downloads larger than 128 MiB over RDMA no longer request checksum
+  validation (ranged GETs carry no full-object checksum).
+
+### Internal
+
+- `RdmaInterceptor` takes `(channel, handle)` segments instead of one channel
+  plus handles; the unused multi-token GET/PUT helpers were removed.
+- hsc configures the provider's pool slot size explicitly (`RDMA_MAX_BIND_SIZE`).
+
 ## [0.5.1] - 2026-11-19
 
 ### Changed

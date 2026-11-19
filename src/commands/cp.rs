@@ -19,11 +19,12 @@ use tokio::io::AsyncReadExt;
 
 #[cfg(feature = "rdma")]
 use crate::commands::transfer::{
-    bind_rdma_channel, prepare_rdma_get_multi, prepare_rdma_put_multi, prepare_rdma_put_single,
-    send_get_with_optional_rdma_to_writer,
+    prepare_rdma_put, rdma_get_to_writer, rdma_put_fits, RdmaGetSpan, RDMA_MAX_BIND_SIZE,
 };
 #[cfg(feature = "rdma")]
 use crate::rdma::{RdmaClientProvider, RdmaInterceptor};
+#[cfg(feature = "rdma")]
+use tokio::io::AsyncWriteExt;
 
 #[cfg(feature = "rdma")]
 use std::sync::{
@@ -227,17 +228,15 @@ pub async fn upload_file(
     } else {
         // Single PUT — use RDMA when a provider is supplied.
         #[cfg(feature = "rdma")]
-        if let Some(ref provider) = opts.rdma {
+        if let Some(provider) = opts
+            .rdma
+            .as_ref()
+            .filter(|_| rdma_put_fits(file_size as usize, ""))
+        {
             let data = tokio::fs::read(local_path).await?;
             let size = data.len();
             let s3_key = format!("{bucket}/{key}");
-            let maybe_rdma =
-                bind_rdma_channel(provider, size, s3_key.as_bytes()).and_then(|channel| {
-                    let buf =
-                        unsafe { std::slice::from_raw_parts_mut(channel.ptr(), channel.size()) };
-                    buf[..size].copy_from_slice(&data[..size]);
-                    prepare_rdma_put_multi(&channel, size)
-                });
+            let maybe_rdma = prepare_rdma_put(provider, &s3_key, &data, "");
             // For RDMA transfers the data travels via RDMA, not the HTTP body.
             // Use an empty body so content-length is 0 and x-amz-content-sha256
             // reflects SHA256 of the empty string, as the server expects.
@@ -251,9 +250,8 @@ pub async fn upload_file(
                 );
                 let confirmed = Arc::clone(&rdma_confirmed);
                 let interceptor = RdmaInterceptor::new_put(
-                    prepared.channel,
+                    prepared.segments,
                     prepared.token,
-                    prepared.handles,
                     size,
                     rdma_confirmed,
                     false,
@@ -268,7 +266,7 @@ pub async fn upload_file(
                     .interceptor(interceptor)
                     .send()
                     .await?;
-                // prepared.channel is dropped here and deregisters memory.
+                // The interceptor owned the channels; their buffers return to the pool.
                 if confirmed.load(Ordering::Acquire) {
                     println!("Uploaded: {local_path} -> s3://{bucket}/{key}");
                     return Ok(());
@@ -389,14 +387,8 @@ async fn upload_file_multipart(
         let upload_part_response = {
             if let Some(ref provider) = opts.rdma {
                 let s3_key = format!("{bucket}/{key}");
-                let maybe_rdma = bind_rdma_channel(provider, bytes_read, s3_key.as_bytes())
-                    .and_then(|channel| {
-                        let buf = unsafe {
-                            std::slice::from_raw_parts_mut(channel.ptr(), channel.size())
-                        };
-                        buf[..bytes_read].copy_from_slice(&chunk_buf[..bytes_read]);
-                        prepare_rdma_put_single(&channel, bytes_read, "for part ")
-                    });
+                let maybe_rdma =
+                    prepare_rdma_put(provider, &s3_key, &chunk_buf[..bytes_read], "for part ");
 
                 let resp = if let Some(prepared) = maybe_rdma {
                     let rdma_confirmed = Arc::new(AtomicBool::new(false));
@@ -408,9 +400,8 @@ async fn upload_file_multipart(
                     let rdma_part_cksum = cksum_val.clone();
                     let confirmed = Arc::clone(&rdma_confirmed);
                     let interceptor = RdmaInterceptor::new_put(
-                        prepared.channel,
+                        prepared.segments,
                         prepared.token,
-                        prepared.handles,
                         bytes_read,
                         rdma_confirmed,
                         false,
@@ -473,7 +464,6 @@ async fn upload_file_multipart(
                     part_cksum_val = cksum;
                     resp
                 };
-                // prepared.channel is dropped here and deregisters memory.
                 resp
             } else {
                 let (resp, cksum) = upload_part_http(
@@ -584,17 +574,25 @@ pub async fn download_file(
         let head = client.head_object().bucket(bucket).key(key).send().await?;
         let size = head.content_length().unwrap_or(0).max(0) as usize;
         let s3_key = format!("{bucket}/{key}");
-        let maybe_rdma = bind_rdma_channel(provider, size, s3_key.as_bytes())
-            .and_then(|channel| prepare_rdma_get_multi(&channel, size));
         let mut request = client.get_object().bucket(bucket).key(key);
-        if let Some(mode) = opts.checksum_mode.clone() {
-            request = request.checksum_mode(mode);
+        // Objects larger than one RDMA buffer are fetched with ranged GETs, for
+        // which servers return no full-object checksum; only request checksum
+        // validation for single-request downloads.
+        if size <= RDMA_MAX_BIND_SIZE {
+            if let Some(mode) = opts.checksum_mode.clone() {
+                request = request.checksum_mode(mode);
+            }
         }
         request =
             apply_sse_customer_to_get_object(request, opts.sse.destination_customer_headers()?);
         let mut file = fs::File::create(local_path).await?;
-        send_get_with_optional_rdma_to_writer(request, maybe_rdma, size, &mut file).await?;
-        // rdma_channel is dropped here and deregisters memory.
+        let span = RdmaGetSpan {
+            start: 0,
+            len: size as u64,
+            whole_object: true,
+        };
+        rdma_get_to_writer(provider, &s3_key, request, span, &mut file).await?;
+        file.flush().await?;
         println!("Downloaded: s3://{bucket}/{key} -> {local_path}");
         return Ok(());
     }

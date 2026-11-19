@@ -66,10 +66,6 @@ pub(crate) fn build_range_header(range: ByteRange) -> Option<String> {
     }
 }
 
-pub(crate) fn bounded_len(range: ByteRange) -> Option<usize> {
-    range.len.map(|len| len as usize)
-}
-
 fn invalid_format(range: &str, style: RangeErrorStyle) -> String {
     match style {
         RangeErrorStyle::Cat => format!(
@@ -117,7 +113,6 @@ mod tests {
             }
         );
         assert_eq!(build_range_header(range), Some("bytes=0-9".to_string()));
-        assert_eq!(bounded_len(range), Some(10));
     }
 
     #[test]
@@ -150,7 +145,6 @@ mod tests {
             }
         );
         assert_eq!(build_range_header(range), Some("bytes=100-".to_string()));
-        assert_eq!(bounded_len(range), None);
     }
 
     #[test]

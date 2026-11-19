@@ -331,6 +331,12 @@ NVIDIA cuObject client SDK) for Ubuntu 24.04 and Rocky 8; release packages ship 
 At runtime the plugin needs `libcuobjclient.so.1` (NVIDIA `libcuobjclient` package)
 on the library path.
 
+Each RDMA request uses one registered buffer of up to 128 MiB. Downloads, `cat`
+and `cmp` of larger objects are split into ranged GETs automatically. Uploads use
+RDMA per multipart part, so keep `--part-size` at or below `128m`; larger
+request bodies (including `--disable-multipart` uploads over 128 MiB) are sent
+over plain HTTP.
+
 Enable RDMA at runtime:
 
 ```bash
@@ -350,7 +356,7 @@ Configure via `~/.aws/config`:
 ```ini
 [default]
 rdma = auto       # enable RDMA, auto-select provider
-# rdma = rdma     # require RDMA plugin specifically
+# rdma = cuobj    # require the cuObject provider specifically
 # rdma = mock     # always use mock provider
 # rdma = false    # disable
 ```

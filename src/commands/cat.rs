@@ -1,6 +1,4 @@
-use crate::commands::range::{
-    bounded_len, build_range_header, parse_range_options, RangeErrorStyle,
-};
+use crate::commands::range::{build_range_header, parse_range_options, RangeErrorStyle};
 use crate::path_utils::{parse_path, PathType};
 use aws_sdk_s3::Client;
 use std::path::Path;
@@ -8,9 +6,7 @@ use tokio::fs::File;
 use tokio::io::{self, AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 #[cfg(feature = "rdma")]
-use crate::commands::transfer::{
-    bind_rdma_channel, prepare_rdma_get_single, send_get_with_optional_rdma_to_writer,
-};
+use crate::commands::transfer::{rdma_get_to_writer, RdmaGetSpan};
 #[cfg(feature = "rdma")]
 use crate::rdma::RdmaClientProvider;
 #[cfg(feature = "rdma")]
@@ -86,45 +82,51 @@ async fn cat_s3_object(
     } = opts;
     let byte_range = parse_range_options(range, offset, size, RangeErrorStyle::Cat)?;
     let range_hdr = build_range_header(byte_range);
-    let _range_len = bounded_len(byte_range);
 
     // When RDMA is enabled and we know the response size, use the RDMA path.
     #[cfg(feature = "rdma")]
     if let Some(ref provider) = rdma {
-        // We need the byte count to allocate a receive buffer.  A HEAD request
-        // gives us Content-Length; for ranged requests we compute from the range.
-        let byte_count: Option<usize> = if range_hdr.is_some() {
-            _range_len
-        } else {
-            // Full object — HEAD for size
-            let mut head_req = client.head_object().bucket(bucket).key(key);
-            if let Some(ref v) = version_id {
-                head_req = head_req.version_id(v.clone());
+        // We need the byte count to allocate receive buffers.  For ranged
+        // requests it comes from the range; otherwise a HEAD request gives us
+        // Content-Length.  Single-part GETs (--part-number) stay on HTTP:
+        // HyperStore fails RDMA GETs that carry partNumber.
+        let span: Option<RdmaGetSpan> = match (byte_range.start, byte_range.len) {
+            _ if part_number.is_some() => {
+                eprintln!("[rdma] --part-number reads are not served over RDMA; using plain HTTP");
+                None
             }
-            head_req
-                .send()
-                .await
-                .ok()
-                .and_then(|h| h.content_length())
-                .map(|n| n.max(0) as usize)
+            (Some(start), Some(len)) => Some(RdmaGetSpan {
+                start,
+                len,
+                whole_object: false,
+            }),
+            (Some(_), None) => None, // open-ended range: size unknown, use HTTP
+            _ => {
+                let mut head_req = client.head_object().bucket(bucket).key(key);
+                if let Some(ref v) = version_id {
+                    head_req = head_req.version_id(v.clone());
+                }
+                head_req
+                    .send()
+                    .await
+                    .ok()
+                    .and_then(|h| h.content_length())
+                    .map(|n| RdmaGetSpan {
+                        start: 0,
+                        len: n.max(0) as u64,
+                        whole_object: true,
+                    })
+            }
         };
 
-        if let Some(size) = byte_count {
+        if let Some(span) = span {
             let s3_key = format!("{bucket}/{key}");
-            let maybe_rdma = bind_rdma_channel(provider, size, s3_key.as_bytes())
-                .and_then(|channel| prepare_rdma_get_single(&channel, size));
             let mut request = client.get_object().bucket(bucket).key(key);
-            if let Some(ref r) = range_hdr {
-                request = request.range(r.clone());
-            }
-            if let Some(p) = part_number {
-                request = request.part_number(p);
-            }
             if let Some(ref v) = version_id {
                 request = request.version_id(v.clone());
             }
             let mut stdout = io::stdout();
-            send_get_with_optional_rdma_to_writer(request, maybe_rdma, size, &mut stdout).await?;
+            rdma_get_to_writer(provider, &s3_key, request, span, &mut stdout).await?;
             stdout.flush().await?;
             return Ok(());
         }

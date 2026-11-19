@@ -342,15 +342,29 @@ where
     Ok(())
 }
 
+/// Largest buffer hsc binds for a single RDMA segment.
+///
+/// The cuObj client provider serves binds from a pool of registered buffers of
+/// this size and rejects anything larger, so every RDMA transfer is split into
+/// segments of at most this many bytes.  `main` configures the provider's pool
+/// slot size with this value.
+#[cfg(feature = "rdma")]
+pub(crate) const RDMA_MAX_BIND_SIZE: usize = crate::rdma::DEFAULT_RDMA_BUF_SIZE;
+
+/// RDMA buffers and tokens prepared for one S3 request.
 #[cfg(feature = "rdma")]
 pub(crate) struct PreparedRdmaTransfer {
-    pub channel: Arc<dyn RdmaClientChannel>,
+    /// One `(channel, handle)` per buffer segment, in data order.
+    pub segments: Vec<(Arc<dyn RdmaClientChannel>, RdmaTransferHandle)>,
+    /// `|`-joined tokens of all segments, sent as `x-amz-rdma-token`.
     pub token: Vec<u8>,
-    pub handles: Vec<RdmaTransferHandle>,
 }
 
+/// Send `request` (a GET for exactly `size` bytes), receiving the data over
+/// RDMA when `prepared` is set and the server confirms it, otherwise from the
+/// HTTP body, and write it to `writer`.
 #[cfg(feature = "rdma")]
-pub(crate) async fn send_get_with_optional_rdma_to_writer<W>(
+async fn send_get_with_optional_rdma_to_writer<W>(
     request: GetObjectFluentBuilder,
     prepared: Option<PreparedRdmaTransfer>,
     size: usize,
@@ -359,74 +373,165 @@ pub(crate) async fn send_get_with_optional_rdma_to_writer<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let rdma_attempted = prepared.is_some();
-    let rdma_channel = prepared
-        .as_ref()
-        .map(|prepared| Arc::clone(&prepared.channel));
-    let rdma_confirmed = Arc::new(AtomicBool::new(false));
-
-    let response = if let Some(prepared) = prepared {
-        let interceptor = RdmaInterceptor::new_get(
-            prepared.channel,
-            prepared.token,
-            prepared.handles,
-            size,
-            Arc::clone(&rdma_confirmed),
-            false,
-        );
-        request.customize().interceptor(interceptor).send().await?
-    } else {
-        request.send().await?
+    let Some(prepared) = prepared else {
+        let response = request.send().await?;
+        return stream_body_to_writer(response.body, writer).await;
     };
 
-    if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
-        let channel = rdma_channel.as_ref().unwrap();
+    // GETs are prepared with a single segment (see `prepare_rdma_get`).
+    let channel = Arc::clone(&prepared.segments[0].0);
+    let rdma_confirmed = Arc::new(AtomicBool::new(false));
+    let interceptor = RdmaInterceptor::new_get(
+        prepared.segments,
+        prepared.token,
+        size,
+        Arc::clone(&rdma_confirmed),
+        false,
+    );
+    let response = request.customize().interceptor(interceptor).send().await?;
+
+    if rdma_confirmed.load(Ordering::Acquire) {
         let buf = unsafe { std::slice::from_raw_parts(channel.ptr(), channel.size()) };
         writer.write_all(&buf[..size]).await?;
     } else {
         stream_body_to_writer(response.body, writer).await?;
     }
-
     Ok(())
 }
 
+/// Which bytes of an object an RDMA GET should fetch.
 #[cfg(feature = "rdma")]
-pub(crate) async fn send_get_with_optional_rdma_to_vec(
+pub(crate) struct RdmaGetSpan {
+    /// First byte to fetch.
+    pub start: u64,
+    /// Number of bytes to fetch.
+    pub len: u64,
+    /// The span is the whole object (or the whole of the part selected on the
+    /// request).  A whole object that fits in one RDMA segment is fetched
+    /// without a `Range` header; anything else is fetched with ranged GETs.
+    pub whole_object: bool,
+}
+
+/// Fetch `span` of an object over RDMA and write it to `writer`.
+///
+/// `request` is the base GetObject request (bucket, key, version, SSE-C, …)
+/// without a `Range`.  Spans larger than [`RDMA_MAX_BIND_SIZE`] are fetched as
+/// consecutive ranged GETs of at most that size, so objects of any size move
+/// over RDMA with bounded memory.  A segment whose RDMA buffer cannot be bound,
+/// or that the server declines to serve over RDMA, is read from the HTTP body.
+#[cfg(feature = "rdma")]
+pub(crate) async fn rdma_get_to_writer<W>(
+    provider: &Arc<dyn RdmaClientProvider>,
+    s3_key: &str,
     request: GetObjectFluentBuilder,
-    prepared: Option<PreparedRdmaTransfer>,
-    size: usize,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let rdma_attempted = prepared.is_some();
-    let rdma_channel = prepared
-        .as_ref()
-        .map(|prepared| Arc::clone(&prepared.channel));
-    let rdma_confirmed = Arc::new(AtomicBool::new(false));
+    span: RdmaGetSpan,
+    writer: &mut W,
+) -> Result<(), Box<dyn std::error::Error>>
+where
+    W: AsyncWrite + Unpin,
+{
+    for seg in split_get_span(&span, RDMA_MAX_BIND_SIZE as u64) {
+        let size = seg.len as usize;
+        let prepared = prepare_rdma_get(provider, s3_key, size);
+        let req = if seg.ranged {
+            request
+                .clone()
+                .range(format!("bytes={}-{}", seg.start, seg.start + seg.len - 1))
+        } else {
+            request.clone()
+        };
+        send_get_with_optional_rdma_to_writer(req, prepared, size, writer).await?;
+    }
+    Ok(())
+}
 
-    let response = if let Some(prepared) = prepared {
-        let interceptor = RdmaInterceptor::new_get(
-            prepared.channel,
-            prepared.token,
-            prepared.handles,
-            size,
-            Arc::clone(&rdma_confirmed),
-            false,
+/// One GET request of an RDMA download.
+#[cfg(feature = "rdma")]
+#[derive(Debug, PartialEq, Eq)]
+struct GetSegment {
+    start: u64,
+    len: u64,
+    /// Send with a `Range` header (false only for a whole object in one request).
+    ranged: bool,
+}
+
+/// Split `span` into GET requests of at most `max` bytes each.
+#[cfg(feature = "rdma")]
+fn split_get_span(span: &RdmaGetSpan, max: u64) -> Vec<GetSegment> {
+    if span.whole_object && span.len <= max {
+        return vec![GetSegment {
+            start: span.start,
+            len: span.len,
+            ranged: false,
+        }];
+    }
+    let end = span.start + span.len;
+    let mut segs = Vec::new();
+    let mut off = span.start;
+    while off < end {
+        let len = max.min(end - off);
+        segs.push(GetSegment {
+            start: off,
+            len,
+            ranged: true,
+        });
+        off += len;
+    }
+    segs
+}
+
+#[cfg(all(test, feature = "rdma"))]
+mod tests {
+    use super::{split_get_span, GetSegment, RdmaGetSpan};
+
+    fn span(start: u64, len: u64, whole_object: bool) -> RdmaGetSpan {
+        RdmaGetSpan {
+            start,
+            len,
+            whole_object,
+        }
+    }
+
+    fn seg(start: u64, len: u64, ranged: bool) -> GetSegment {
+        GetSegment { start, len, ranged }
+    }
+
+    #[test]
+    fn whole_object_that_fits_is_one_unranged_get() {
+        assert_eq!(
+            split_get_span(&span(0, 100, true), 100),
+            vec![seg(0, 100, false)]
         );
-        request.customize().interceptor(interceptor).send().await?
-    } else {
-        request.send().await?
-    };
+        assert_eq!(
+            split_get_span(&span(0, 0, true), 100),
+            vec![seg(0, 0, false)]
+        );
+    }
 
-    if rdma_attempted && rdma_confirmed.load(Ordering::Acquire) {
-        let channel = rdma_channel.as_ref().unwrap();
-        let buf = unsafe { std::slice::from_raw_parts(channel.ptr(), channel.size()) };
-        Ok(buf[..size].to_vec())
-    } else {
-        Ok(response.body.collect().await?.into_bytes().to_vec())
+    #[test]
+    fn large_whole_object_is_split_into_ranged_gets() {
+        assert_eq!(
+            split_get_span(&span(0, 250, true), 100),
+            vec![seg(0, 100, true), seg(100, 100, true), seg(200, 50, true)]
+        );
+    }
+
+    #[test]
+    fn ranges_are_always_ranged_and_split_from_their_start() {
+        assert_eq!(
+            split_get_span(&span(5, 10, false), 100),
+            vec![seg(5, 10, true)]
+        );
+        assert_eq!(
+            split_get_span(&span(50, 200, false), 100),
+            vec![seg(50, 100, true), seg(150, 100, true)]
+        );
     }
 }
 
+/// Bind one RDMA buffer of `size` bytes, or `None` (after logging) on failure.
 #[cfg(feature = "rdma")]
-pub(crate) fn bind_rdma_channel(
+fn bind_rdma_channel(
     provider: &Arc<dyn RdmaClientProvider>,
     size: usize,
     s3_key: &[u8],
@@ -444,16 +549,20 @@ pub(crate) fn bind_rdma_channel(
     }
 }
 
+/// Bind a buffer and prepare a GET token for `size` bytes
+/// (at most [`RDMA_MAX_BIND_SIZE`]).  `None` means "use plain HTTP".
 #[cfg(feature = "rdma")]
-pub(crate) fn prepare_rdma_get_single(
-    channel: &Arc<dyn RdmaClientChannel>,
+fn prepare_rdma_get(
+    provider: &Arc<dyn RdmaClientProvider>,
+    s3_key: &str,
     size: usize,
 ) -> Option<PreparedRdmaTransfer> {
+    debug_assert!(size <= RDMA_MAX_BIND_SIZE);
+    let channel = bind_rdma_channel(provider, size, s3_key.as_bytes())?;
     match channel.prepare_get(0, size) {
         Ok(h) => Some(PreparedRdmaTransfer {
-            channel: Arc::clone(channel),
             token: h.token().to_vec(),
-            handles: vec![h],
+            segments: vec![(channel, h)],
         }),
         Err(e) => {
             eprintln!("[rdma] prepare_get failed ({e}); falling back to plain HTTP");
@@ -462,49 +571,45 @@ pub(crate) fn prepare_rdma_get_single(
     }
 }
 
+/// Whether a PUT body of `len` bytes fits in one RDMA buffer; logs why not.
 #[cfg(feature = "rdma")]
-pub(crate) fn prepare_rdma_get_multi(
-    channel: &Arc<dyn RdmaClientChannel>,
-    size: usize,
-) -> Option<PreparedRdmaTransfer> {
-    let max_transfer = channel.get_max_transfer_size();
-    if size <= max_transfer {
-        return prepare_rdma_get_single(channel, size);
+pub(crate) fn rdma_put_fits(len: usize, failure_context: &str) -> bool {
+    if len <= RDMA_MAX_BIND_SIZE {
+        return true;
     }
-
-    let mut tok_strs = Vec::new();
-    let mut handles = Vec::new();
-    let mut off = 0usize;
-    while off < size {
-        let n = max_transfer.min(size - off);
-        match channel.prepare_get(off, n) {
-            Ok(h) => {
-                tok_strs.push(String::from_utf8_lossy(h.token()).into_owned());
-                handles.push(h);
-                off += n;
-            }
-            Err(_) => return None,
-        }
-    }
-
-    Some(PreparedRdmaTransfer {
-        channel: Arc::clone(channel),
-        token: tok_strs.join("|").into_bytes(),
-        handles,
-    })
+    eprintln!(
+        "[rdma] request body {failure_context}({len} bytes) exceeds one RDMA buffer \
+         ({RDMA_MAX_BIND_SIZE} bytes); sending over plain HTTP \
+         (use multipart with --part-size of at most {}m for RDMA)",
+        RDMA_MAX_BIND_SIZE >> 20
+    );
+    false
 }
 
+/// Copy `data` into an RDMA buffer and prepare a PUT token, for a single
+/// PutObject/UploadPart.  `None` (after logging) means "send the body over
+/// plain HTTP".
+///
+/// One request can carry only one RDMA buffer: HyperStore rejects `|`-joined
+/// multi-token PUTs.  Bodies larger than [`RDMA_MAX_BIND_SIZE`] therefore go
+/// over HTTP; multipart uploads with parts of at most that size use RDMA.
 #[cfg(feature = "rdma")]
-pub(crate) fn prepare_rdma_put_single(
-    channel: &Arc<dyn RdmaClientChannel>,
-    size: usize,
+pub(crate) fn prepare_rdma_put(
+    provider: &Arc<dyn RdmaClientProvider>,
+    s3_key: &str,
+    data: &[u8],
     failure_context: &str,
 ) -> Option<PreparedRdmaTransfer> {
-    match channel.prepare_put(0, size) {
+    if !rdma_put_fits(data.len(), failure_context) {
+        return None;
+    }
+    let channel = bind_rdma_channel(provider, data.len(), s3_key.as_bytes())?;
+    let buf = unsafe { std::slice::from_raw_parts_mut(channel.ptr(), channel.size()) };
+    buf[..data.len()].copy_from_slice(data);
+    match channel.prepare_put(0, data.len()) {
         Ok(h) => Some(PreparedRdmaTransfer {
-            channel: Arc::clone(channel),
             token: h.token().to_vec(),
-            handles: vec![h],
+            segments: vec![(channel, h)],
         }),
         Err(e) => {
             eprintln!(
@@ -513,59 +618,4 @@ pub(crate) fn prepare_rdma_put_single(
             None
         }
     }
-}
-
-#[cfg(feature = "rdma")]
-pub(crate) fn prepare_rdma_put_multi(
-    channel: &Arc<dyn RdmaClientChannel>,
-    size: usize,
-) -> Option<PreparedRdmaTransfer> {
-    let max_transfer = channel.get_max_transfer_size();
-    if size <= max_transfer {
-        match channel.prepare_put(0, size) {
-            Ok(h) => {
-                return Some(PreparedRdmaTransfer {
-                    channel: Arc::clone(channel),
-                    token: h.token().to_vec(),
-                    handles: vec![h],
-                });
-            }
-            Err(e) => {
-                if e.is_fallback_eligible() {
-                    eprintln!("[rdma] prepare_put failed ({e}); falling back to plain HTTP");
-                } else {
-                    eprintln!("[rdma] prepare_put error ({e})");
-                }
-                return None;
-            }
-        }
-    }
-
-    let mut tok_strs = Vec::new();
-    let mut handles = Vec::new();
-    let mut off = 0usize;
-    while off < size {
-        let n = max_transfer.min(size - off);
-        match channel.prepare_put(off, n) {
-            Ok(h) => {
-                tok_strs.push(String::from_utf8_lossy(h.token()).into_owned());
-                handles.push(h);
-                off += n;
-            }
-            Err(e) => {
-                eprintln!(
-                    "[rdma] prepare_put failed for multi-token \
-                     (tok={}, {e}); falling back to plain HTTP",
-                    tok_strs.len()
-                );
-                return None;
-            }
-        }
-    }
-
-    Some(PreparedRdmaTransfer {
-        channel: Arc::clone(channel),
-        token: tok_strs.join("|").into_bytes(),
-        handles,
-    })
 }

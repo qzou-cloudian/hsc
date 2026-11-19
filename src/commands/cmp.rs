@@ -11,9 +11,7 @@ use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 #[cfg(feature = "rdma")]
-use crate::commands::transfer::{
-    bind_rdma_channel, prepare_rdma_get_single, send_get_with_optional_rdma_to_vec,
-};
+use crate::commands::transfer::{rdma_get_to_writer, RdmaGetSpan};
 #[cfg(feature = "rdma")]
 use crate::rdma::RdmaClientProvider;
 #[cfg(feature = "rdma")]
@@ -377,23 +375,34 @@ async fn open_reader(
                 0
             };
 
-            #[cfg_attr(not(feature = "rdma"), allow(unused_variables))]
-            let byte_count = limit.unwrap_or(total_size) as usize;
             let range_hdr =
                 build_range_header(crate::commands::range::ByteRange { start, len: limit });
 
             #[cfg(feature = "rdma")]
             if let Some(ref provider) = rdma {
                 let s3_key = format!("{}/{}", bucket, key);
-                let maybe_rdma = bind_rdma_channel(provider, byte_count, s3_key.as_bytes())
-                    .and_then(|channel| prepare_rdma_get_single(&channel, byte_count));
+                let span = match (start, limit) {
+                    (None, None) => RdmaGetSpan {
+                        start: 0,
+                        len: total_size,
+                        whole_object: true,
+                    },
+                    (s, Some(len)) => RdmaGetSpan {
+                        start: s.unwrap_or(0),
+                        len,
+                        whole_object: false,
+                    },
+                    (Some(s), None) => RdmaGetSpan {
+                        start: s,
+                        len: total_size.saturating_sub(s),
+                        whole_object: false,
+                    },
+                };
                 let mut req = client.get_object().bucket(&bucket).key(&key);
-                if let Some(ref r) = range_hdr {
-                    req = req.range(r.clone());
-                }
                 req =
                     apply_sse_customer_to_get_object(req, sse_customer_headers(sse_c, sse_c_key)?);
-                let bytes = send_get_with_optional_rdma_to_vec(req, maybe_rdma, byte_count).await?;
+                let mut bytes = Vec::with_capacity(span.len as usize);
+                rdma_get_to_writer(provider, &s3_key, req, span, &mut bytes).await?;
                 return Ok(Reader {
                     inner: ReaderInner::S3 {
                         data: bytes,

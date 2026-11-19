@@ -29,6 +29,11 @@ if [ -f "$SO" ]; then
 fi
 
 cat > ~/rpmbuild/SPECS/hsc.spec << EOF
+# libs3rdmaclient.so links libcuobjclient.so.1, but the plugin is only loaded
+# at runtime for --rdma, and the cuObject SDK is often installed outside RPM
+# (e.g. on HyperStore nodes).  Don't make hsc require it.
+%global __requires_exclude ^libcuobjclient[.]so
+
 Name:       hsc
 Version:    ${VERSION}
 Release:    1%{?dist}
