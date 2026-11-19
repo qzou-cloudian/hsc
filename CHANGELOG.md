@@ -2,9 +2,23 @@
 
 All notable changes to hsc will be documented in this file.
 
-## [0.5.0] - 2026-05-10
+## [0.5.0] - 2026-11-19
+
+### Fixed
+
+- **RDMA upload falsely reported success on 501**: a `501` `x-amz-rdma-reply` previously
+  marked the transfer as RDMA-confirmed, so uploads succeeded although nothing was stored.
+  RDMA is now confirmed only on `200`/`204`/`206`; otherwise the body is resent over HTTP.
+- **RDMA bind/prepare errors are surfaced**: silent `.ok()` chains replaced with explicit
+  error logging and fallback to HTTP.
+- **`upload_file` early return**: a misplaced `return Ok(())` caused non-RDMA uploads to
+  return without sending the request.
+- **`ls` URL-encoded keys**: keys in list responses are now decoded before display.
 
 ### Changed
+
+- **RDMA provider construction** migrated to the `RdmaProviderConfig::builder()` API,
+  replacing the deprecated `create_client_provider()`.
 
 - **RDMA handle types unified**: `RdmaPutHandle` and `RdmaGetHandle` are replaced by a
   single `RdmaTransferHandle` type, matching the updated `s3-rdma` API. Affects the
@@ -26,6 +40,10 @@ All notable changes to hsc will be documented in this file.
 
 ### Internal
 
+- Extracted listing, object metadata, range, and transfer helpers into dedicated modules.
+- Command signatures now take option structs (`CopyOptions`, `SyncOptions`, `CatOptions`,
+  etc.) instead of long positional parameter lists; multipart resolution and SSE config
+  building consolidated in `main`.
 - Removed unnecessary `as *mut u8` cast in `cp.rs` RDMA upload paths (pointer type
   already correct after `RdmaClientChannel::ptr()` return-type change).
 - Fixed stale usage example in `src/rdma/interceptor.rs` doc comment (wrong `bind`
